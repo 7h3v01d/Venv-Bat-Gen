@@ -212,12 +212,3 @@ Issues and PRs welcome. The codebase is intentionally simple:
 - Add a CLI flag → `_build_generate_parser()` in `cli.py`, wire through `_cmd_generate()`
 - Add a GUI option → `_build_options_group()` in `gui.py`, wire through `_read_config()`
 
----
-
-## License
-
-MIT — see [LICENSE](LICENSE).
-
----
-
-*Built by [KeystoneAI](https://github.com/keystoneai) · Iterated with the help of Claude (Anthropic)*
