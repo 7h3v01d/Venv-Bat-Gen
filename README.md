@@ -220,4 +220,3 @@ MIT — see [LICENSE](LICENSE).
 
 ---
 
-*Built by [KeystoneAI](https://github.com/keystoneai) · Iterated with the help of Claude (Anthropic)*
