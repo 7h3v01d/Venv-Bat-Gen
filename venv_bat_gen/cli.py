@@ -382,13 +382,12 @@ def main() -> None:
         prog="venv-bat-gen",
         description=(
             "Venv Batch Template Generator  —  CLI\n"
-            "KeystoneAI\n\n"
             "Generates project-local .bat helper scripts that call\n"
             r".venv\Scripts\python.exe directly — no manual activation needed."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--version", action="version", version="venv-bat-gen 3.3.0 (KeystoneAI)")
+    parser.add_argument("--version", action="version", version="venv-bat-gen 3.3.0")
 
     sub = parser.add_subparsers(dest="subcommand", metavar="<subcommand>")
     sub.required = True

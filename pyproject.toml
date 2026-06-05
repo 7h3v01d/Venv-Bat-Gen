@@ -4,23 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "venv-bat-gen"
-version = "3.3.0"
+version = "3.3.6"
 description = "Generate project-local venv helper scripts (.bat + .sh) for Windows, WSL, macOS, and Linux."
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
 requires-python = ">=3.11"
-authors = [
-    { name = "KeystoneAI", email = "hello@keystoneai.dev" },
-]
-keywords = [
-    "venv",
-    "virtualenv",
-    "batch",
-    "windows",
-    "developer-tools",
-    "uv",
-    "python-tooling",
-]
+keywords = ["venv", "virtualenv", "batch", "windows", "developer-tools", "uv", "python-tooling"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Environment :: Win32 (MS Windows)",
@@ -36,10 +25,11 @@ classifiers = [
     "Topic :: Software Development :: Build Tools",
     "Topic :: Utilities",
 ]
-dependencies = [
-    "PyQt6>=6.4",
-]
+dependencies = ["PyQt6>=6.4"]
 
+[[project.authors]]
+name = "Leon Priest"
+email = "leonpriest76@gmail.com"
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
@@ -53,9 +43,9 @@ venv-bat-gen = "venv_bat_gen.cli:main"
 venv-bat-gen-gui = "venv_bat_gen.gui:main"
 
 [project.urls]
-Homepage = "https://github.com/keystoneai/venv-bat-gen"
-Repository = "https://github.com/keystoneai/venv-bat-gen"
-"Bug Tracker" = "https://github.com/keystoneai/venv-bat-gen/issues"
+Homepage = "https://github.com/7h3v01d/Venv-Project-Templates"
+Repository = "https://github.com/7h3v01d/Venv-Project-Templates"
+"Bug Tracker" = "https://github.com/7h3v01d/Venv-Project-Templates/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["venv_bat_gen"]

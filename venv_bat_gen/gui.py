@@ -1134,7 +1134,7 @@ class App(QWidget):
 def main() -> None:
     app = QApplication(sys.argv)
     app.setApplicationName("Venv Batch Template Generator")
-    app.setOrganizationName("KeystoneAI")
+    app.setOrganizationName("Leon Priest")
     app.setStyleSheet(STYLESHEET)
     window = App()
     window.show()
