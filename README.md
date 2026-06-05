@@ -47,7 +47,7 @@ uv tool install venv-bat-gen
 
 **From source:**
 ```bash
-git clone https://github.com/keystoneai/venv-bat-gen
+git clone https://github.com/7h3v01d/Venv-Project-Templates
 cd venv-bat-gen
 pip install -e .
 ```
@@ -146,7 +146,7 @@ Built-in presets (read-only):
 | Streamlit App | runner | streamlit | — | — |
 | uv Project | module | app | ✔ | — |
 
-User presets are saved to `~/.keystoneai/venv_generator_presets.json` and persist across sessions.
+User presets are saved to `~/.venvbatgen/venv_generator_presets.json` and persist across sessions.
 
 ---
 
