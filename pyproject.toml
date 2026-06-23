@@ -4,12 +4,23 @@ build-backend = "hatchling.build"
 
 [project]
 name = "venv-bat-gen"
-version = "3.3.6"
+version = "3.4.0"
 description = "Generate project-local venv helper scripts (.bat + .sh) for Windows, WSL, macOS, and Linux."
 readme = "README.md"
-license = "MIT"
+license = { text = "MIT" }
 requires-python = ">=3.11"
-keywords = ["venv", "virtualenv", "batch", "windows", "developer-tools", "uv", "python-tooling"]
+authors = [
+    { name = "Leon Priest", email = "leonpriest76@gmail.com" },
+]
+keywords = [
+    "venv",
+    "virtualenv",
+    "batch",
+    "windows",
+    "developer-tools",
+    "uv",
+    "python-tooling",
+]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Environment :: Win32 (MS Windows)",
@@ -25,11 +36,10 @@ classifiers = [
     "Topic :: Software Development :: Build Tools",
     "Topic :: Utilities",
 ]
-dependencies = ["PyQt6>=6.4"]
+dependencies = [
+    "PyQt6>=6.4",
+]
 
-[[project.authors]]
-name = "Leon Priest"
-email = "leonpriest76@gmail.com"
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",

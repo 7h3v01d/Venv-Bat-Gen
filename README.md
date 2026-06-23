@@ -8,9 +8,6 @@ This tool generates a complete set of project-local helper scripts in seconds, f
 
 ---
 
-<img width="1147" height="985" alt="Screenshot" src="https://github.com/user-attachments/assets/6ce523c6-d8b3-4fd8-af82-c174a084d19f" />
-
-
 ## What it generates
 
 For every project, `venv-bat-gen` writes up to **12 scripts** (`.bat` for Windows, `.sh` for POSIX):
@@ -47,7 +44,7 @@ uv tool install venv-bat-gen
 
 **From source:**
 ```bash
-git clone https://github.com/7h3v01d/Venv-Project-Templates
+git clone https://github.com/keystoneai/venv-bat-gen
 cd venv-bat-gen
 pip install -e .
 ```
@@ -146,7 +143,7 @@ Built-in presets (read-only):
 | Streamlit App | runner | streamlit | — | — |
 | uv Project | module | app | ✔ | — |
 
-User presets are saved to `~/.venvbatgen/venv_generator_presets.json` and persist across sessions.
+User presets are saved to `~/.keystoneai/venv_generator_presets.json` and persist across sessions.
 
 ---
 
@@ -215,3 +212,12 @@ Issues and PRs welcome. The codebase is intentionally simple:
 - Add a CLI flag → `_build_generate_parser()` in `cli.py`, wire through `_cmd_generate()`
 - Add a GUI option → `_build_options_group()` in `gui.py`, wire through `_read_config()`
 
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+---
+
+*Built by [KeystoneAI](https://github.com/keystoneai) · Iterated with the help of Claude (Anthropic)*

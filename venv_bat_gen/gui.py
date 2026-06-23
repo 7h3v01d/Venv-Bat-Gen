@@ -632,6 +632,7 @@ class App(QWidget):
         self._chk_uv           = QCheckBox("Use uv  (faster installs)")
         self._chk_posix        = QCheckBox("Generate POSIX .sh scripts")
         self._chk_setup        = QCheckBox("Include setup script")
+        self._chk_self_unpack  = QCheckBox("Repo mode: single self-unpacking setup.bat")
 
         grid.addWidget(self._chk_overwrite,    0, 0)
         grid.addWidget(self._chk_requirements, 0, 1)
@@ -642,9 +643,13 @@ class App(QWidget):
         grid.addWidget(self._chk_uv,           3, 0)
         grid.addWidget(self._chk_posix,        3, 1)
         grid.addWidget(self._chk_setup,        4, 0)
+        grid.addWidget(self._chk_self_unpack,  4, 1)
 
         # uv checkbox updates the "Create .venv" label to clarify which tool
         self._chk_uv.toggled.connect(self._on_uv_toggled)
+        # self_unpack and setup are mutually exclusive
+        self._chk_self_unpack.toggled.connect(self._on_self_unpack_toggled)
+        self._chk_setup.toggled.connect(self._on_setup_toggled)
 
         return grp
 
@@ -798,6 +803,7 @@ class App(QWidget):
             use_uv=self._chk_uv.isChecked(),
             include_posix=self._chk_posix.isChecked(),
             include_setup=self._chk_setup.isChecked(),
+            self_unpack=self._chk_self_unpack.isChecked(),
         )
 
     # ------------------------------------------------------------------
@@ -846,6 +852,7 @@ class App(QWidget):
             "use_uv":                  self._chk_uv.isChecked(),
             "include_posix":           self._chk_posix.isChecked(),
             "include_setup":           self._chk_setup.isChecked(),
+            "self_unpack":             self._chk_self_unpack.isChecked(),
         }
         self._presets.save(name, data)
         self._reload_preset_combo(select=name)
@@ -890,6 +897,7 @@ class App(QWidget):
         if "use_uv"                 in data: self._chk_uv.setChecked(data["use_uv"])
         if "include_posix"          in data: self._chk_posix.setChecked(data["include_posix"])
         if "include_setup"          in data: self._chk_setup.setChecked(data["include_setup"])
+        if "self_unpack"            in data: self._chk_self_unpack.setChecked(data["self_unpack"])
 
     def _reload_preset_combo(self, select: str | None = None) -> None:
         self._preset_combo.blockSignals(True)
@@ -908,6 +916,19 @@ class App(QWidget):
     def _on_uv_toggled(self, checked: bool) -> None:
         label = "Create .venv now  (uv venv)" if checked else "Create .venv now  (python -m venv)"
         self._chk_create_venv.setText(label)
+
+    def _on_self_unpack_toggled(self, checked: bool) -> None:
+        """When self-unpack is on, disable standalone setup (they're incompatible)."""
+        if checked and self._chk_setup.isChecked():
+            self._chk_setup.setChecked(False)
+        self._chk_setup.setEnabled(not checked)
+        self._refresh_preview()
+
+    def _on_setup_toggled(self, checked: bool) -> None:
+        """When standalone setup is on, disable self-unpack."""
+        if checked and self._chk_self_unpack.isChecked():
+            self._chk_self_unpack.setChecked(False)
+        self._chk_self_unpack.setEnabled(not checked)
 
     def _on_project_dir_changed(self, text: str) -> None:
         if text.strip() and not self._project_name.text().strip():
@@ -1029,7 +1050,7 @@ class App(QWidget):
                     placeholder = (
                         "(not included — enable 'Include test.bat' to preview)"
                         if "test" in name
-                        else "(not included — enable 'Include setup script' to preview)"
+                        else "(not included — enable 'Include setup script' or 'Repo mode' to preview)"
                         if "setup" in name
                         else "(not included — enable 'Generate POSIX .sh scripts' to preview)"
                         if name.endswith(".sh")
@@ -1040,9 +1061,10 @@ class App(QWidget):
             if cfg.entry_mode == "runner" and cfg.runner_args:
                 detail += f" {cfg.runner_args}"
             tags = []
-            if cfg.use_uv:         tags.append("uv")
-            if cfg.include_posix:  tags.append("posix")
-            if cfg.include_setup:  tags.append("setup")
+            if cfg.use_uv:          tags.append("uv")
+            if cfg.include_posix:   tags.append("posix")
+            if cfg.include_setup:   tags.append("setup")
+            if cfg.self_unpack:     tags.append("self-unpack")
             tag_str = "  [" + ", ".join(tags) + "]" if tags else ""
             self._status(f"Preview updated — {cfg.project_name}  [{detail}]{tag_str}")
         except ValueError as exc:
@@ -1134,7 +1156,7 @@ class App(QWidget):
 def main() -> None:
     app = QApplication(sys.argv)
     app.setApplicationName("Venv Batch Template Generator")
-    app.setOrganizationName("Leon Priest")
+    app.setOrganizationName("Leon Priest / 7h3v01d")
     app.setStyleSheet(STYLESHEET)
     window = App()
     window.show()

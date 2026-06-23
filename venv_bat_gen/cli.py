@@ -16,6 +16,7 @@ from .core import (
     PresetManager,
     MODULE_RE,
     RUNNER_ARGS_UNSAFE_RE,
+    _VERSION,
     build_previews,
     create_venv,
     generate_files,
@@ -63,7 +64,9 @@ def _build_generate_parser(sub) -> argparse.ArgumentParser:
         help="Generate the .bat helper set for a project folder.",
         description=(
             "Generate run.bat, pip.bat, shell.bat, sync.bat, doctor.bat\n"
-            "(and optionally test.bat) in the target project folder.\n\n"
+            "(and optionally test.bat / setup.bat) in the target project folder.\n\n"
+            "Use --self-unpack to generate a single repo-friendly setup.bat that\n"
+            "bootstraps the venv and writes all companion scripts on first run.\n\n"
             "Priority: CLI flags > --preset > folder auto-detect > defaults."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -99,189 +102,163 @@ def _build_generate_parser(sub) -> argparse.ArgumentParser:
     p.add_argument("--no-pause",        action="store_true",
                    help="Do not pause run.bat on exit.")
     p.add_argument("--create-venv",     action="store_true",
-                   help="Create the .venv now.")
-    p.add_argument("--test-bat",        action="store_true",
+                   help="Create the .venv immediately after generating scripts.")
+    p.add_argument("--test",            action="store_true",
                    help="Include test.bat (pytest runner).")
-    p.add_argument("--uv",             action="store_true",
-                   help="Use uv instead of pip in generated scripts.")
-    p.add_argument("--posix",          action="store_true",
-                   help="Also generate POSIX .sh equivalents of all scripts.")
-    p.add_argument("--setup",          action="store_true",
-                   help="Include setup.bat / setup.sh bootstrap script.")
-
-    p.add_argument("--no-detect", action="store_true",
-                   help="Skip folder auto-detection.")
-    p.add_argument("--dry-run",   action="store_true",
-                   help="Print what would be written without writing anything.")
+    p.add_argument("--uv",              action="store_true",
+                   help="Generate uv-flavoured scripts instead of pip.")
+    p.add_argument("--posix",           action="store_true",
+                   help="Also generate POSIX .sh equivalents.")
+    p.add_argument("--setup",           action="store_true",
+                   help="Include a standalone setup.bat bootstrap script.")
+    p.add_argument("--self-unpack",     action="store_true",
+                   help=(
+                       "Generate a single self-unpacking setup.bat for repo distribution. "
+                       "Encodes all companion scripts as base64 and writes them via certutil "
+                       "on first run. Mutually exclusive with --setup."
+                   ))
+    p.add_argument("--preview",         action="store_true",
+                   help="Print generated content to stdout instead of writing files.")
+    p.add_argument("--list-presets",    action="store_true",
+                   help="List available presets and exit.")
 
     return p
 
 
-def _resolve(cli_val, preset_data: dict, preset_key: str, scan_val, default):
-    """Priority: CLI arg > preset > scan > default.
-
-    cli_val should be None when the user did not supply the flag (argparse
-    default=None), not False — booleans should use _resolve_flag instead.
-    """
-    if cli_val is not None:
-        return cli_val
-    if preset_key in preset_data:
-        return preset_data[preset_key]
-    if scan_val is not None:
-        return scan_val
-    return default
-
-
-def _resolve_flag(cli_flag: bool, preset_data: dict, preset_key: str, default: bool) -> bool:
-    """For boolean flags: CLI True beats preset beats default."""
-    if cli_flag:
-        return True
-    if preset_key in preset_data:
-        return bool(preset_data[preset_key])
-    return default
-
-
 def _cmd_generate(args: argparse.Namespace) -> int:
-    folder: Path = args.folder.resolve()
+    pm = PresetManager()
 
-    # --- Preset ---
+    if args.list_presets:
+        _print_header("Available Presets")
+        for name in pm.names():
+            marker = C.dim("(built-in)") if pm.is_builtin(name) else C.accent("(user)")
+            print(f"  {C.bold(name)}  {marker}")
+        print()
+        return 0
+
+    # Mutual exclusion: --self-unpack and --setup can't both be active
+    if args.self_unpack and args.setup:
+        print(C.err("[ERROR] --self-unpack and --setup are mutually exclusive."), file=sys.stderr)
+        print("        --self-unpack already embeds the bootstrap logic inside the single file.")
+        return 1
+
+    folder       = args.folder.resolve()
+    project_name = args.name or folder.name
+
+    # Start from preset defaults if given
     preset_data: dict = {}
     if args.preset:
-        pm = PresetManager()
         preset_data = pm.get(args.preset) or {}
         if not preset_data:
-            print(C.err(f"Preset not found: {args.preset!r}"))
-            print(C.dim("  Run `venv-bat-gen presets` to list available presets."))
-            return 1
-        print(C.dim(f"  Loaded preset: {args.preset}"))
+            print(C.warn(f"[WARN] Preset '{args.preset}' not found — ignoring."))
 
-    # --- Auto-detect ---
-    scan: FolderScan | None = None
-    if not args.no_detect and folder.exists():
-        venv_dir_hint = args.venv_dir or preset_data.get("venv_dir", ".venv")
-        scan = scan_project_folder(folder, venv_dir_hint)
-        if scan.hints:
-            _print_header("Folder scan")
-            for h in scan.hints:
-                print(f"  {h}")
+    # Auto-detect from folder (lower priority than explicit flags)
+    scan = scan_project_folder(folder, args.venv_dir)
+    if scan.hints:
+        _print_header(f"Folder scan: {folder.name}")
+        for h in scan.hints:
+            print(f"  {h}")
+        print()
 
-    # --- Resolve config ---
-    entry_mode = _resolve(args.entry_mode,  preset_data, "entry_mode",
-                          scan.suggested_entry_mode if scan else None, "file")
-    app_entry  = _resolve(args.entry or None, preset_data, "app_entry",
-                          scan.suggested_app_entry if scan else None, "main.py")
-    runner_args = _resolve(args.runner_args or None, preset_data, "runner_args",
-                           scan.suggested_runner_args if scan else None, "")
-    project_name = args.name or folder.name
-    venv_dir     = args.venv_dir or preset_data.get("venv_dir", ".venv")
+    # Resolve each setting: CLI flag > preset > scan suggestion > hardcoded default
+    def _pick(cli_val, preset_key, scan_val, default):
+        if cli_val is not None:
+            return cli_val
+        if preset_key in preset_data:
+            return preset_data[preset_key]
+        if scan_val is not None:
+            return scan_val
+        return default
 
-    overwrite        = _resolve_flag(args.overwrite,     preset_data, "overwrite_existing",     False)
-    create_req       = not args.no_requirements and _resolve_flag(False, preset_data, "create_requirements", True)
-    webengine        = _resolve_flag(args.webengine,     preset_data, "include_webengine_check", False)
-    pause_on_exit    = not args.no_pause and _resolve_flag(False, preset_data, "pause_on_exit", True)
-    create_venv_now  = _resolve_flag(args.create_venv,  preset_data, "create_venv_now",         False)
-    include_test_bat = _resolve_flag(args.test_bat,      preset_data, "include_test_bat",        False)
-    use_uv           = _resolve_flag(
-        args.uv,
-        preset_data, "use_uv",
-        scan.suggested_use_uv if scan else False,
-    )
-    include_posix    = _resolve_flag(
-        args.posix,
-        preset_data, "include_posix",
-        scan.suggested_use_posix if scan else False,
-    )
-    include_setup    = _resolve_flag(
-        args.setup,
-        preset_data, "include_setup",
-        False,
-    )
+    entry_mode  = _pick(args.entry_mode,  "entry_mode", scan.suggested_entry_mode,  "file")
+    app_entry   = _pick(args.entry,       "app_entry",  scan.suggested_app_entry,   "main.py")
+    runner_args = _pick(args.runner_args or None, "runner_args", scan.suggested_runner_args, "")
+    use_uv      = _pick(True if args.uv else None, "use_uv", scan.suggested_use_uv if scan.suggested_use_uv else None, False)
+    include_pos = _pick(True if args.posix else None, "include_posix", scan.suggested_use_posix if scan.suggested_use_posix else None, False)
 
-    # --- Validate ---
-    if entry_mode in ("module", "runner"):
-        if not MODULE_RE.match(app_entry):
-            print(C.err(f"Invalid module name for {entry_mode} mode: {app_entry!r}"))
-            return 1
-    if entry_mode == "runner" and RUNNER_ARGS_UNSAFE_RE.search(runner_args):
-        print(C.err('Runner args contain unsafe batch characters: & | < > ^ "'))
-        return 1
+    self_unpack = args.self_unpack or preset_data.get("self_unpack", False)
 
     cfg = GeneratorConfig(
         project_dir=folder,
         project_name=project_name,
-        venv_dir=venv_dir,
+        venv_dir=args.venv_dir,
         entry_mode=entry_mode,
-        app_entry=app_entry,
-        runner_args=runner_args,
-        overwrite_existing=overwrite,
-        create_requirements=create_req,
-        include_webengine_check=webengine,
-        pause_on_exit=pause_on_exit,
-        create_venv_now=create_venv_now,
-        include_test_bat=include_test_bat,
+        app_entry=app_entry or "main.py",
+        runner_args=runner_args or "",
+        overwrite_existing=args.overwrite or preset_data.get("overwrite_existing", False),
+        create_requirements=not args.no_requirements and preset_data.get("create_requirements", True),
+        include_webengine_check=args.webengine or preset_data.get("include_webengine_check", False),
+        pause_on_exit=not args.no_pause and preset_data.get("pause_on_exit", True),
+        create_venv_now=args.create_venv or preset_data.get("create_venv_now", False),
+        include_test_bat=args.test or preset_data.get("include_test_bat", False),
         use_uv=use_uv,
-        include_posix=include_posix,
-        include_setup=include_setup,
+        include_posix=include_pos,
+        include_setup=args.setup or preset_data.get("include_setup", False),
+        self_unpack=self_unpack,
     )
 
-    # --- Summary ---
-    _print_header("Generate")
-    print(f"  Folder  : {C.bold(str(folder))}")
-    print(f"  Name    : {project_name}")
-    print(f"  Venv    : {venv_dir}/")
-    print(f"  Mode    : {entry_mode}  →  {app_entry}"
-          + (f"  {runner_args}" if entry_mode == "runner" and runner_args else ""))
-    flags = []
-    if use_uv:           flags.append("uv")
-    if include_posix:    flags.append("posix")
-    if include_setup:    flags.append("setup")
-    if overwrite:        flags.append("overwrite")
-    if create_req:       flags.append("requirements.txt")
-    if webengine:        flags.append("webengine-check")
-    if not pause_on_exit: flags.append("no-pause")
-    if create_venv_now:  flags.append("create-venv")
-    if include_test_bat: flags.append("test.bat")
-    if flags:
-        print(f"  Options : {', '.join(flags)}")
-    print()
+    # Validate entry point
+    if cfg.entry_mode in {"module", "runner"}:
+        if not MODULE_RE.match(cfg.app_entry):
+            print(C.err(f"[ERROR] Invalid module name: '{cfg.app_entry}'"), file=sys.stderr)
+            return 1
+    if cfg.entry_mode == "runner" and RUNNER_ARGS_UNSAFE_RE.search(cfg.runner_args):
+        print(C.err("[ERROR] Runner args contain unsafe characters: & | < > ^ \""), file=sys.stderr)
+        return 1
 
-    if args.dry_run:
-        files = list(build_previews(cfg).keys())
-        if create_req:
-            files.append("requirements.txt")
-        print(C.warn("  DRY RUN — no files written."))
-        for f in files:
-            print(C.dim(f"    {folder / f}"))
-        print()
+    if args.preview:
+        previews = build_previews(cfg)
+        for name, content in previews.items():
+            _print_header(name)
+            print(content)
         return 0
 
-    # --- Write ---
+    _print_header(f"Generating for: {folder}")
+    mode_str = cfg.entry_mode
+    if cfg.self_unpack:
+        mode_str = "self-unpack"
+    uv_str   = "  [uv]" if cfg.use_uv else ""
+    posix_str = "  [+posix]" if cfg.include_posix else ""
+    print(f"  Mode  : {mode_str}{uv_str}{posix_str}")
+    print(f"  Entry : {cfg.app_entry}")
+    if cfg.entry_mode == "runner" and cfg.runner_args:
+        print(f"  Args  : {cfg.runner_args}")
+    print()
+
     try:
         written = generate_files(cfg)
     except FileExistsError as exc:
-        print(C.err(f"  File exists: {exc}"))
-        print(C.dim("  Use --overwrite to replace existing files."))
+        print(C.err(f"[ERROR] {exc}"), file=sys.stderr)
         return 1
     except Exception as exc:
-        print(C.err(f"  Error: {exc}"))
+        print(C.err(f"[ERROR] {exc}"), file=sys.stderr)
         return 1
 
     for path in written:
         print(f"  {C.ok('✔')}  {path.name}")
 
-    if create_venv_now:
-        venv_path = folder / venv_dir
+    if cfg.self_unpack:
+        print()
+        print(C.dim("  Tip: add these to .gitignore (generated on first run):"))
+        names = ["run.bat", "pip.bat", "shell.bat", "sync.bat", "doctor.bat"]
+        if cfg.include_test_bat: names.append("test.bat")
+        if cfg.include_posix:
+            names += ["run.sh", "pip.sh", "shell.sh", "sync.sh", "doctor.sh"]
+            if cfg.include_test_bat: names.append("test.sh")
+        print(f"  {C.dim(chr(10).join('    ' + n for n in names))}")
+
+    if cfg.create_venv_now:
+        venv_path = folder / cfg.venv_dir
         if venv_path.exists():
-            print(C.warn(f"\n  ⚠  .venv already exists at {venv_path} — skipped."))
+            print(C.warn(f"\n  [SKIP] .venv already exists at {venv_path}"))
         else:
-            tool = "uv" if use_uv else "python -m venv"
-            print(C.dim(f"\n  Creating .venv via {tool} …"))
+            tool = "uv venv" if cfg.use_uv else "python -m venv"
+            print(f"\n  Creating .venv via {tool}…")
             try:
                 create_venv(cfg)
-                print(C.ok("  ✔  .venv created."))
+                print(C.ok(f"  ✔  .venv created at {venv_path}"))
             except Exception as exc:
-                print(C.err(f"  ✖  venv creation failed: {exc}"))
-                return 1
+                print(C.err(f"  [ERROR] venv creation failed: {exc}"), file=sys.stderr)
 
     print()
     print(C.ok(f"  Done — {len(written)} file(s) written to {folder}"))
@@ -296,39 +273,21 @@ def _cmd_generate(args: argparse.Namespace) -> int:
 def _build_scan_parser(sub) -> argparse.ArgumentParser:
     p = sub.add_parser(
         "scan",
-        help="Inspect a folder and report what was found.",
+        help="Inspect a project folder and show detected settings.",
+        description="Scan a project folder and print what venv-bat-gen would auto-detect.",
     )
-    p.add_argument("folder", type=Path)
-    p.add_argument("--venv-dir", metavar="DIR", default=".venv")
+    p.add_argument("folder",    type=Path, help="Project folder to scan.")
+    p.add_argument("--venv-dir", metavar="DIR", default=".venv",
+                   help="Venv subdirectory to check (default: .venv).")
     return p
 
 
 def _cmd_scan(args: argparse.Namespace) -> int:
     folder = args.folder.resolve()
-    if not folder.exists():
-        print(C.err(f"Folder does not exist: {folder}"))
-        return 1
-
-    scan = scan_project_folder(folder, args.venv_dir)
-    _print_header(f"Scan: {folder.name}")
+    scan   = scan_project_folder(folder, args.venv_dir)
+    _print_header(f"Scan: {folder}")
     for h in scan.hints:
         print(f"  {h}")
-
-    if scan.suggested_entry_mode:
-        print()
-        print(C.accent("  Suggested generate command:"))
-        mode_flag = {"runner": "--runner", "module": "--module", "file": "--file"}.get(
-            scan.suggested_entry_mode, "--file"
-        )
-        cmd = f"  venv-bat-gen generate {folder} {mode_flag} --entry {scan.suggested_app_entry}"
-        if scan.suggested_runner_args:
-            cmd += f' --runner-args "{scan.suggested_runner_args}"'
-        if scan.suggested_use_uv:
-            cmd += " --uv"
-        if scan.suggested_use_posix:
-            cmd += " --posix"
-        print(C.bold(cmd))
-
     print()
     return 0
 
@@ -338,37 +297,19 @@ def _cmd_scan(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 def _build_presets_parser(sub) -> argparse.ArgumentParser:
-    p = sub.add_parser("presets", help="List all available presets.")
-    p.add_argument("--detail", action="store_true", help="Show full preset contents.")
+    p = sub.add_parser(
+        "presets",
+        help="List available presets.",
+    )
     return p
 
 
-def _cmd_presets(args: argparse.Namespace) -> int:
-    pm    = PresetManager()
-    names = pm.names()
-
-    if not names:
-        print(C.dim("  No presets found."))
-        return 0
-
-    _print_header("Presets")
-    for name in names:
-        tag    = C.dim("(built-in)") if pm.is_builtin(name) else C.accent("(user)")
-        data   = pm.get(name) or {}
-        mode   = data.get("entry_mode", "?")
-        entry  = data.get("app_entry", "?")
-        rargs  = data.get("runner_args", "")
-        uv_tag = C.accent("  [uv]") if data.get("use_uv") else ""
-        summary = f"{mode}: {entry}" + (f"  {rargs}" if rargs else "")
-        print(f"  {C.bold(name)}  {tag}{uv_tag}")
-        print(f"    {C.dim(summary)}")
-        if args.detail:
-            for k, v in data.items():
-                if k not in ("entry_mode", "app_entry", "runner_args"):
-                    print(f"    {C.dim(k + ':')} {v}")
-        print()
-
-    print(C.dim('  Use: venv-bat-gen generate <folder> --preset "<name>" [...overrides]'))
+def _cmd_presets(_args: argparse.Namespace) -> int:
+    pm = PresetManager()
+    _print_header("Available Presets")
+    for name in pm.names():
+        marker = C.dim("(built-in)") if pm.is_builtin(name) else C.accent("(user)")
+        print(f"  {C.bold(name)}  {marker}")
     print()
     return 0
 
@@ -377,29 +318,34 @@ def _cmd_presets(args: argparse.Namespace) -> int:
 # Entry point
 # ---------------------------------------------------------------------------
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="venv-bat-gen",
         description=(
-            "Venv Batch Template Generator  —  CLI\n"
-            "Generates project-local .bat helper scripts that call\n"
-            r".venv\Scripts\python.exe directly — no manual activation needed."
+            f"Venv Batch Template Generator v{_VERSION}  (Leon Priest / 7h3v01d)\n"
+            "Generate project-local venv helper scripts (.bat + optional .sh).\n\n"
+            "Quick start:\n"
+            "  venv-bat-gen generate ./my_project --entry main.py\n"
+            "  venv-bat-gen generate ./my_project --entry main.py --self-unpack\n"
+            "  venv-bat-gen scan ./my_project"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--version", action="version", version="venv-bat-gen 3.3.0")
+    parser.add_argument("--version", action="version", version=f"venv-bat-gen {_VERSION}")
 
-    sub = parser.add_subparsers(dest="subcommand", metavar="<subcommand>")
-    sub.required = True
-
+    sub = parser.add_subparsers(dest="command", metavar="COMMAND")
     _build_generate_parser(sub)
     _build_scan_parser(sub)
     _build_presets_parser(sub)
 
-    args = parser.parse_args()
-    dispatch = {
-        "generate": _cmd_generate,
-        "scan":     _cmd_scan,
-        "presets":  _cmd_presets,
-    }
-    sys.exit(dispatch[args.subcommand](args))
+    args = parser.parse_args(argv)
+
+    if args.command == "generate":
+        sys.exit(_cmd_generate(args))
+    elif args.command == "scan":
+        sys.exit(_cmd_scan(args))
+    elif args.command == "presets":
+        sys.exit(_cmd_presets(args))
+    else:
+        parser.print_help()
+        sys.exit(0)

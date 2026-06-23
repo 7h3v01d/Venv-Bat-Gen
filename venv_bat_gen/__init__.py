@@ -1,7 +1,7 @@
 """
 venv_bat_gen
 ============
-Venv Batch Template Generator — Leon Priest
+Venv Batch Template Generator — KeystoneAI
 
 Public API:
     from venv_bat_gen.core import GeneratorConfig, generate_files, scan_project_folder
@@ -10,4 +10,4 @@ Public API:
 """
 
 __version__ = "3.3.0"
-__author__  = "Leon Priest"
+__author__  = "KeystoneAI"
