@@ -319,4 +319,4 @@ Apache 2.0 — see [LICENSE](LICENSE).
 
 ---
 
-*Built by [Leon Priest / 7h3v01d](https://github.com/7h3v01d) · Iterated with the help of Claude (Anthropic)*
+*Built by [Leon Priest / 7h3v01d](https://github.com/7h3v01d)
