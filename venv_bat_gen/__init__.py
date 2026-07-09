@@ -9,5 +9,5 @@ Public API:
     from venv_bat_gen.gui import main as gui_main
 """
 
-__version__ = "3.3.0"
-__author__  = "KeystoneAI"
+__version__ = "3.4.0"
+__author__  = "Leon Priest / 7h3v01d"

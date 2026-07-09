@@ -12,7 +12,6 @@ from pathlib import Path
 
 from .core import (
     GeneratorConfig,
-    FolderScan,
     PresetManager,
     MODULE_RE,
     RUNNER_ARGS_UNSAFE_RE,

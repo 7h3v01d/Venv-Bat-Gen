@@ -12,7 +12,7 @@ import json
 import re
 import subprocess
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -1459,7 +1459,7 @@ def make_self_unpacking_setup_bat(cfg: GeneratorConfig) -> str:
 
     # Bootstrap section — differs for uv vs pip
     if cfg.use_uv:
-        bootstrap = f'''\
+        bootstrap = '''\
 where uv >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] uv is not installed or not on PATH.
@@ -1503,7 +1503,7 @@ if exist "%VENV_DIR%\\Scripts\\python.exe" (
     echo.
 )'''
     else:
-        bootstrap = f'''\
+        bootstrap = '''\
 where python >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] Python is not installed or not on PATH.

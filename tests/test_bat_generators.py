@@ -6,7 +6,6 @@ make_doctor_bat, make_test_bat, make_setup_bat.
 
 from __future__ import annotations
 
-from dataclasses import replace
 
 from venv_bat_gen.core import (
     make_doctor_bat,

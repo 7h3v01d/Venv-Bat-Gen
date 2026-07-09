@@ -1,6 +1,6 @@
 # venv-bat-gen
 
-[![CI](https://github.com/7h3v01d/venv-bat-gen/actions/workflows/ci.yml/badge.svg)](https://github.com/7h3v01d/venv-bat-gen/actions/workflows/ci.yml)
+[![CI](https://github.com/7h3v01d/Venv-Bat-Gen/actions/workflows/ci.yml/badge.svg)](https://github.com/7h3v01d/Venv-Bat-Gen/actions/workflows/ci.yml)
 
 **Generate project-local venv helper scripts for Python projects — Windows, WSL, macOS, and Linux.**
 
@@ -100,8 +100,8 @@ uv tool install venv-bat-gen
 
 **From source:**
 ```bash
-git clone https://github.com/7h3v01d/venv-bat-gen
-cd venv-bat-gen
+git clone https://github.com/7h3v01d/Venv-Bat-Gen
+cd Venv-Bat-Gen
 pip install -e .           # CLI only
 pip install -e ".[gui]"    # CLI + GUI
 ```
@@ -318,7 +318,9 @@ Issues and PRs welcome. The codebase is intentionally simple:
 ### Unreleased
 - **PyQt6 is now optional** — moved to a `gui` extra (`pip install venv-bat-gen[gui]`). The CLI has zero dependencies. `venv-bat-gen-gui` / `python -m venv_bat_gen` (no args) now exit with an actionable install hint instead of a bare `ModuleNotFoundError` when PyQt6 isn't installed.
 - **Test suite** — added `tests/`, covering every template generator, the self-unpacking round-trip, the folder scanner, the preset system, and the full CLI argparse layer (100% line coverage of `core.py` and `cli.py`).
-- **CI** — GitHub Actions workflow running the test suite across Windows/macOS/Linux × Python 3.11–3.13, plus package build verification.
+- **CI** — GitHub Actions workflow running the test suite across Windows/macOS/Linux × Python 3.11–3.13, a `ruff` lint gate, and package build verification.
+- **Lint cleanup** — removed 3 unused imports and 2 stray f-string prefixes; the codebase's deliberate compact `if x: y` one-liner style is now a documented, project-wide `ruff` ignore (`E701`) rather than unaddressed noise.
+- **Fixed stale metadata** — `__init__.py`'s `__version__`/`__author__` now match `pyproject.toml` and the current `Leon Priest / 7h3v01d` branding; project URLs across `README.md` and `pyproject.toml` now consistently point to `github.com/7h3v01d/Venv-Bat-Gen`.
 
 ### v3.4.0
 - **Repo mode** — new `--self-unpack` CLI flag and "Repo mode" GUI checkbox. Generates a single `setup.bat` containing all companion scripts encoded as base64, decoded via `certutil` on first run. Safe to re-run — existing files are never overwritten.
