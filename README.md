@@ -1,5 +1,7 @@
 # venv-bat-gen
 
+[![CI](https://github.com/7h3v01d/venv-bat-gen/actions/workflows/ci.yml/badge.svg)](https://github.com/7h3v01d/venv-bat-gen/actions/workflows/ci.yml)
+
 **Generate project-local venv helper scripts for Python projects — Windows, WSL, macOS, and Linux.**
 
 `venv-bat-gen` solves a specific Windows pain point: activating a virtual environment manually is annoying, error-prone, and breaks in scripts. The correct approach is to call `.venv\Scripts\python.exe` directly — but writing those helper scripts by hand every time is tedious.
@@ -319,4 +321,4 @@ Apache 2.0 — see [LICENSE](LICENSE).
 
 ---
 
-*Built by [Leon Priest / 7h3v01d](https://github.com/7h3v01d)
+*Built by [Leon Priest / 7h3v01d](https://github.com/7h3v01d) 
