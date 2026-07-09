@@ -36,22 +36,28 @@ classifiers = [
     "Topic :: Software Development :: Build Tools",
     "Topic :: Utilities",
 ]
-dependencies = [
-    "PyQt6>=6.4",
-]
+dependencies = []
 
 [project.optional-dependencies]
+gui = [
+    "PyQt6>=6.4",
+]
 dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.1",
+]
+dev-gui = [
     "pytest>=7.0",
     "pytest-qt>=4.2",
     "pytest-cov>=4.1",
+    "PyQt6>=6.4",
 ]
 
 [project.scripts]
 venv-bat-gen = "venv_bat_gen.cli:main"
 
 [project.gui-scripts]
-venv-bat-gen-gui = "venv_bat_gen.gui:main"
+venv-bat-gen-gui = "venv_bat_gen.gui_launcher:main"
 
 [project.urls]
 Homepage = "https://github.com/7h3v01d/Venv-Project-Templates"

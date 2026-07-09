@@ -75,14 +75,22 @@ test.sh
 
 ## Installation
 
+The CLI has zero dependencies. Install the `gui` extra only if you want the desktop app.
+
 **Via pip:**
 ```bash
+# CLI only
 pip install venv-bat-gen
+
+# CLI + GUI
+pip install "venv-bat-gen[gui]"
 ```
 
 **Via uv (recommended):**
 ```bash
 uv pip install venv-bat-gen
+# or with the GUI:
+uv pip install "venv-bat-gen[gui]"
 ```
 
 **Via uv tool (globally, isolated):**
@@ -94,10 +102,16 @@ uv tool install venv-bat-gen
 ```bash
 git clone https://github.com/7h3v01d/venv-bat-gen
 cd venv-bat-gen
-pip install -e .
+pip install -e .           # CLI only
+pip install -e ".[gui]"    # CLI + GUI
 ```
 
-> **Note:** The GUI requires PyQt6. If you only need the CLI, PyQt6 is still installed as a dependency — a headless CLI-only mode may be added in a future release.
+> **Note:** Running `venv-bat-gen-gui` (or `python -m venv_bat_gen` with no
+> arguments) without the `gui` extra installed prints an install hint and
+> exits — it won't silently do nothing or dump a bare traceback. On Windows,
+> that message is only visible if you launch it from a terminal; a
+> double-clicked shortcut with PyQt6 missing will exit with no visible
+> output, since it runs windowless.
 
 ---
 
@@ -271,7 +285,7 @@ written = generate_files(cfg_repo)  # writes only setup.bat
 ## Requirements
 
 - Python 3.11+
-- PyQt6 6.4+ (GUI only)
+- PyQt6 6.4+ — only needed for the GUI; install via `pip install venv-bat-gen[gui]`
 - `certutil` (built into Windows 7+ — required at runtime by the generated self-unpacking `setup.bat`)
 - uv (optional — only needed if using `--uv` / "Use uv" mode)
 
@@ -300,6 +314,11 @@ Issues and PRs welcome. The codebase is intentionally simple:
 ---
 
 ## Changelog
+
+### Unreleased
+- **PyQt6 is now optional** — moved to a `gui` extra (`pip install venv-bat-gen[gui]`). The CLI has zero dependencies. `venv-bat-gen-gui` / `python -m venv_bat_gen` (no args) now exit with an actionable install hint instead of a bare `ModuleNotFoundError` when PyQt6 isn't installed.
+- **Test suite** — added `tests/`, covering every template generator, the self-unpacking round-trip, the folder scanner, the preset system, and the full CLI argparse layer (100% line coverage of `core.py` and `cli.py`).
+- **CI** — GitHub Actions workflow running the test suite across Windows/macOS/Linux × Python 3.11–3.13, plus package build verification.
 
 ### v3.4.0
 - **Repo mode** — new `--self-unpack` CLI flag and "Repo mode" GUI checkbox. Generates a single `setup.bat` containing all companion scripts encoded as base64, decoded via `certutil` on first run. Safe to re-run — existing files are never overwritten.

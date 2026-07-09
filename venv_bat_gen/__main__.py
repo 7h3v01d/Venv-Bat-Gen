@@ -8,6 +8,6 @@ import sys
 if len(sys.argv) > 1:
     from venv_bat_gen.cli import main
 else:
-    from venv_bat_gen.gui import main
+    from venv_bat_gen.gui_launcher import main
 
 main()
