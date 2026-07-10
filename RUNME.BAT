@@ -1,2 +1,2 @@
-python run_gui.py
+.venv\Scripts\python.exe run_gui.py
 pause
