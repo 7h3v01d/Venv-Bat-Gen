@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -176,7 +177,15 @@ class TestMakeTestSh:
         assert "EXITCODE=0" in content
         assert '"$PY" -m pytest -v "$@" || EXITCODE=$?' in content
 
-    @pytest.mark.skipif(shutil.which("bash") is None, reason="requires bash")
+    @pytest.mark.skipif(
+        sys.platform == "win32" or shutil.which("bash") is None,
+        reason=(
+            "requires a native POSIX bash; skipped unconditionally on Windows "
+            "since a 'bash' resolved there is usually WSL's wrapper, which runs "
+            "in its own Linux filesystem and can't accept a native Windows path "
+            "like C:\\...\\test.sh the way real bash / Git Bash's MSYS layer can"
+        ),
+    )
     def test_failed_tests_still_print_banner_and_propagate_exit_code(self, cfg_factory, tmp_path):
         # End-to-end proof the guard actually works at runtime, not just
         # that the right-looking text is present in the template.
