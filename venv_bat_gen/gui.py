@@ -350,6 +350,52 @@ class BashHighlighter(QSyntaxHighlighter):
             self.setFormat(m.start(), m.end() - m.start(), self._fmt(PALETTE["bat_rem"]))
 
 
+class PowerShellHighlighter(QSyntaxHighlighter):
+    """Minimal PowerShell syntax highlighter for .ps1 preview tabs."""
+    import re as _re
+    _RE_KEYWORDS = _re.compile(
+        r"\b(if|else|elseif|switch|foreach|for|while|do|function|return"
+        r"|exit|param|try|catch|finally|begin|process|end|break|continue"
+        r"|Write-Host|Read-Host|Test-Path|Join-Path|Set-Location|Get-Command)\b",
+        _re.IGNORECASE,
+    )
+    _RE_COMMENT = _re.compile(r"#.*$")
+    _RE_VAR     = _re.compile(r"\$[A-Za-z_][A-Za-z0-9_]*")
+    _RE_DSTRING = _re.compile(r'"[^"\n]*"')
+    _RE_SSTRING = _re.compile(r"'[^'\n]*'")
+    _RE_REQUIRES = _re.compile(r"^#Requires")
+
+    def __init__(self, document) -> None:
+        super().__init__(document)
+
+    @staticmethod
+    def _fmt(hex_color: str, bold: bool = False) -> QTextCharFormat:
+        f = QTextCharFormat()
+        f.setForeground(QColor(hex_color))
+        if bold:
+            f.setFontWeight(700)
+        return f
+
+    def highlightBlock(self, text: str) -> None:
+        stripped = text.lstrip()
+        # #Requires directive and full-line comments
+        if self._RE_REQUIRES.match(stripped) or stripped.startswith("#"):
+            self.setFormat(0, len(text), self._fmt(PALETTE["bat_rem"]))
+            return
+        # Keywords
+        for m in self._RE_KEYWORDS.finditer(text):
+            self.setFormat(m.start(), m.end() - m.start(),
+                           self._fmt(PALETTE["bat_keyword"], bold=True))
+        # Variables ($VAR)
+        for m in self._RE_VAR.finditer(text):
+            self.setFormat(m.start(), m.end() - m.start(), self._fmt(PALETTE["bat_var"]))
+        # Double- and single-quoted strings
+        for m in self._RE_DSTRING.finditer(text):
+            self.setFormat(m.start(), m.end() - m.start(), self._fmt(PALETTE["bat_string"]))
+        for m in self._RE_SSTRING.finditer(text):
+            self.setFormat(m.start(), m.end() - m.start(), self._fmt(PALETTE["bat_string"]))
+
+
 # ---------------------------------------------------------------------------
 # Worker thread
 # ---------------------------------------------------------------------------
@@ -631,6 +677,7 @@ class App(QWidget):
         self._chk_test_bat     = QCheckBox("Include test.bat  (pytest runner)")
         self._chk_uv           = QCheckBox("Use uv  (faster installs)")
         self._chk_posix        = QCheckBox("Generate POSIX .sh scripts")
+        self._chk_powershell   = QCheckBox("Generate PowerShell .ps1 scripts")
         self._chk_setup        = QCheckBox("Include setup script")
         self._chk_self_unpack  = QCheckBox("Repo mode: single self-unpacking setup.bat")
 
@@ -642,8 +689,9 @@ class App(QWidget):
         grid.addWidget(self._chk_test_bat,     2, 1)
         grid.addWidget(self._chk_uv,           3, 0)
         grid.addWidget(self._chk_posix,        3, 1)
-        grid.addWidget(self._chk_setup,        4, 0)
-        grid.addWidget(self._chk_self_unpack,  4, 1)
+        grid.addWidget(self._chk_powershell,   4, 0)
+        grid.addWidget(self._chk_setup,        4, 1)
+        grid.addWidget(self._chk_self_unpack,  5, 0)
 
         # uv checkbox updates the "Create .venv" label to clarify which tool
         self._chk_uv.toggled.connect(self._on_uv_toggled)
@@ -707,16 +755,20 @@ class App(QWidget):
 
         self._preview_editors: dict[str, QPlainTextEdit] = {}
         for name in ("run.bat", "pip.bat", "shell.bat", "sync.bat", "doctor.bat", "test.bat", "setup.bat",
-                     "run.sh",  "pip.sh",  "shell.sh",  "sync.sh",  "doctor.sh",  "test.sh",  "setup.sh"):
+                     "run.sh",  "pip.sh",  "shell.sh",  "sync.sh",  "doctor.sh",  "test.sh",  "setup.sh",
+                     "run.ps1", "pip.ps1", "shell.ps1", "sync.ps1", "doctor.ps1", "test.ps1", "setup.ps1"):
             editor = QPlainTextEdit()
             editor.setReadOnly(True)
             if name.endswith(".sh"):
                 BashHighlighter(editor.document())
+            elif name.endswith(".ps1"):
+                PowerShellHighlighter(editor.document())
             else:
                 BatHighlighter(editor.document())
             self._preview_editors[name] = editor
-            # .sh tabs hidden by default — shown when include_posix is active
-            if not name.endswith(".sh"):
+            # .sh / .ps1 tabs hidden by default — shown when their
+            # respective "generate ... equivalents" checkbox is active
+            if not name.endswith(".sh") and not name.endswith(".ps1"):
                 self._preview_tabs.addTab(editor, name)
 
         return w
@@ -802,6 +854,7 @@ class App(QWidget):
             include_test_bat=self._chk_test_bat.isChecked(),
             use_uv=self._chk_uv.isChecked(),
             include_posix=self._chk_posix.isChecked(),
+            include_powershell=self._chk_powershell.isChecked(),
             include_setup=self._chk_setup.isChecked(),
             self_unpack=self._chk_self_unpack.isChecked(),
         )
@@ -851,6 +904,7 @@ class App(QWidget):
             "include_test_bat":        self._chk_test_bat.isChecked(),
             "use_uv":                  self._chk_uv.isChecked(),
             "include_posix":           self._chk_posix.isChecked(),
+            "include_powershell":      self._chk_powershell.isChecked(),
             "include_setup":           self._chk_setup.isChecked(),
             "self_unpack":             self._chk_self_unpack.isChecked(),
         }
@@ -896,6 +950,7 @@ class App(QWidget):
         if "include_test_bat"       in data: self._chk_test_bat.setChecked(data["include_test_bat"])
         if "use_uv"                 in data: self._chk_uv.setChecked(data["use_uv"])
         if "include_posix"          in data: self._chk_posix.setChecked(data["include_posix"])
+        if "include_powershell"     in data: self._chk_powershell.setChecked(data["include_powershell"])
         if "include_setup"          in data: self._chk_setup.setChecked(data["include_setup"])
         if "self_unpack"            in data: self._chk_self_unpack.setChecked(data["self_unpack"])
 
@@ -1054,6 +1109,8 @@ class App(QWidget):
                         if "setup" in name
                         else "(not included — enable 'Generate POSIX .sh scripts' to preview)"
                         if name.endswith(".sh")
+                        else "(not included — enable 'Generate PowerShell .ps1 scripts' to preview)"
+                        if name.endswith(".ps1")
                         else ""
                     )
                     editor.setPlainText(placeholder)

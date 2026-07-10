@@ -12,7 +12,29 @@ import json
 
 import pytest
 
-from venv_bat_gen.core import PresetManager
+from venv_bat_gen.core import GeneratorConfig, PresetManager
+
+
+class TestPresetFieldsCompleteness:
+    """Regression guard for a real bug found via GUI smoke testing: adding
+    a new boolean field to GeneratorConfig (include_powershell) without
+    also adding it to PresetManager's internal field allowlist meant
+    save() silently dropped it — a saved preset would look fine in the
+    UI but quietly lose the setting on disk. This checks every bool field
+    on GeneratorConfig (other than project_dir/project_name, which aren't
+    preset-able) has a corresponding entry in the allowlist, so the next
+    new flag can't reintroduce the same silent-drop bug."""
+
+    def test_every_boolean_config_field_is_in_the_preset_allowlist(self):
+        from venv_bat_gen.core import _PRESET_FIELDS
+
+        non_preset_fields = {"project_dir", "project_name"}
+        bool_fields = {
+            name for name, f in GeneratorConfig.__dataclass_fields__.items()
+            if f.type == "bool" and name not in non_preset_fields
+        }
+        missing = bool_fields - set(_PRESET_FIELDS)
+        assert not missing, f"GeneratorConfig field(s) missing from _PRESET_FIELDS: {missing}"
 
 
 @pytest.fixture

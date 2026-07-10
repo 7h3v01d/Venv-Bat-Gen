@@ -50,6 +50,15 @@ def _sh_escape(value: str) -> str:
     return value
 
 
+def _ps1_escape(value: str) -> str:
+    """Escape a value for embedding inside a single-quoted PowerShell string
+    literal. Single quotes are PowerShell's literal-string delimiter, so the
+    only special case is doubling any embedded single quote — no need to
+    worry about $, backticks, or other characters that would trigger
+    interpolation inside a double-quoted string."""
+    return value.replace("'", "''")
+
+
 def _b64_encode(text: str, line_endings: str = "\r\n") -> str:
     """Return base64 of text encoded with given line endings."""
     raw = text.replace("\n", line_endings).encode("utf-8")
@@ -76,6 +85,7 @@ class GeneratorConfig:
     include_test_bat:        bool
     use_uv:                  bool  # use uv instead of pip where possible
     include_posix:           bool  # also generate POSIX .sh equivalents
+    include_powershell:      bool  # also generate PowerShell .ps1 equivalents
     include_setup:           bool  # generate setup.bat / setup.sh bootstrap script
     self_unpack:             bool  # generate single self-unpacking setup.bat
 
@@ -1077,8 +1087,8 @@ echo " Python : $PY"
 echo "============================================================"
 echo ""
 
-"$PY" -m pytest -v "$@"
-EXITCODE=$?
+EXITCODE=0
+"$PY" -m pytest -v "$@" || EXITCODE=$?
 
 echo ""
 echo "============================================================"
@@ -1090,6 +1100,730 @@ fi
 echo "============================================================"
 exit $EXITCODE
 '''
+
+
+# ---------------------------------------------------------------------------
+# PowerShell generators (.ps1 equivalents)
+#
+# Targets Windows PowerShell 5.1+ (the version shipped with Windows), since
+# the whole point of this variant is running on machines where .bat/.cmd
+# execution is blocked by policy but .ps1 is allowed. Templates use raw
+# strings + token substitution rather than f-strings, since PowerShell
+# script blocks use `{ }` constantly and that would mean escaping every
+# single one as `{{`/`}}` in an f-string — this way there's nothing to
+# accidentally get wrong.
+# ---------------------------------------------------------------------------
+
+def _render_ps1(template: str, **replacements: str) -> str:
+    """Substitute __TOKEN__ placeholders in a raw PowerShell template."""
+    for key, value in replacements.items():
+        template = template.replace(f"__{key}__", value)
+    return template
+
+
+def make_run_ps1(cfg: GeneratorConfig) -> str:
+    generated_on = datetime.now().strftime("%Y-%m-%d %H:%M")
+    pause_block = 'Read-Host "Press Enter to continue" | Out-Null' if cfg.pause_on_exit else ""
+
+    template = r'''#Requires -Version 5.1
+# ============================================================
+# Project Runner
+# __GENERATOR_LINE__
+# Generated on: __GENERATED_ON__
+#
+# ENTRY_MODE:
+#   file   -> python app.py
+#   module -> python -m package.module
+#   runner -> python -m runner_module [args...]
+# ============================================================
+Set-Location -Path $PSScriptRoot
+
+$PROJECT_NAME = '__PROJECT_NAME__'
+$VENV_DIR     = '__VENV_DIR__'
+$ENTRY_MODE   = '__ENTRY_MODE__'
+$APP_ENTRY    = '__APP_ENTRY__'
+$RUNNER_ARGS  = '__RUNNER_ARGS__'
+
+$PY = Join-Path $PSScriptRoot "$VENV_DIR\Scripts\python.exe"
+
+if (-not (Test-Path -LiteralPath $PY)) {
+    Write-Host "[ERROR] Local venv not found: `"$PY`""
+    Write-Host ""
+    Write-Host "Fix with:"
+    Write-Host "  python -m venv `"$VENV_DIR`""
+    Write-Host "  `"$VENV_DIR\Scripts\python.exe`" -m pip install --upgrade pip"
+    Write-Host "  `"$VENV_DIR\Scripts\python.exe`" -m pip install -r requirements.txt"
+    Write-Host ""
+    __PAUSE_BLOCK__
+    exit 1
+}
+
+if ($ENTRY_MODE -eq "file" -and -not (Test-Path -LiteralPath $APP_ENTRY)) {
+    Write-Host "[ERROR] Entry file not found: `"$APP_ENTRY`""
+    Write-Host "Edit run.ps1 or run with the correct entry file."
+    __PAUSE_BLOCK__
+    exit 1
+}
+
+$Host.UI.RawUI.WindowTitle = "$PROJECT_NAME - RUN"
+Write-Host "============================================================"
+Write-Host " Running : $PROJECT_NAME"
+Write-Host " Project : $PSScriptRoot"
+Write-Host " Python  : $PY"
+Write-Host " Mode    : $ENTRY_MODE"
+Write-Host " Entry   : $APP_ENTRY"
+if ($ENTRY_MODE -eq "runner") { Write-Host " Args    : $RUNNER_ARGS" }
+Write-Host "============================================================"
+Write-Host ""
+
+switch ($ENTRY_MODE) {
+    "module" { & $PY -m $APP_ENTRY @args }
+    "runner" {
+        if ($RUNNER_ARGS) {
+            $RunnerArgsArray = $RUNNER_ARGS -split '\s+'
+            & $PY -m $APP_ENTRY @RunnerArgsArray @args
+        } else {
+            & $PY -m $APP_ENTRY @args
+        }
+    }
+    default { & $PY $APP_ENTRY @args }
+}
+$EXITCODE = $LASTEXITCODE
+
+Write-Host ""
+Write-Host "============================================================"
+Write-Host " Process exited with code: $EXITCODE"
+Write-Host "============================================================"
+__PAUSE_BLOCK__
+exit $EXITCODE
+'''
+    return _render_ps1(
+        template,
+        GENERATOR_LINE=_GENERATOR_LINE,
+        GENERATED_ON=generated_on,
+        PROJECT_NAME=_ps1_escape(cfg.project_name),
+        VENV_DIR=_ps1_escape(cfg.venv_dir),
+        ENTRY_MODE=_ps1_escape(cfg.entry_mode),
+        APP_ENTRY=_ps1_escape(cfg.app_entry),
+        RUNNER_ARGS=_ps1_escape(cfg.runner_args),
+        PAUSE_BLOCK=pause_block,
+    )
+
+
+def make_pip_ps1(cfg: GeneratorConfig) -> str:
+    generated_on = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    if cfg.use_uv:
+        template = r'''#Requires -Version 5.1
+# ============================================================
+# Project-local uv pip wrapper
+# __GENERATOR_LINE__
+# Generated on: __GENERATED_ON__
+#
+# Usage:
+#   .\pip.ps1 install requests
+#   .\pip.ps1 install -r requirements.txt
+#   .\pip.ps1 freeze > requirements.txt
+#   .\pip.ps1 list
+#   .\pip.ps1 uninstall requests
+# ============================================================
+Set-Location -Path $PSScriptRoot
+
+$VENV_DIR = '__VENV_DIR__'
+
+if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
+    Write-Host "[ERROR] uv is not installed or not on PATH."
+    Write-Host "        Install it with: pip install uv"
+    Write-Host "        Or see: https://github.com/astral-sh/uv"
+    Read-Host "Press Enter to exit" | Out-Null
+    exit 1
+}
+
+uv pip --python (Join-Path $PSScriptRoot "$VENV_DIR\Scripts\python.exe") @args
+exit $LASTEXITCODE
+'''
+    else:
+        template = r'''#Requires -Version 5.1
+# ============================================================
+# Project-local pip wrapper
+# __GENERATOR_LINE__
+# Generated on: __GENERATED_ON__
+#
+# Usage:
+#   .\pip.ps1 install requests
+#   .\pip.ps1 install -r requirements.txt
+#   .\pip.ps1 freeze > requirements.txt
+#   .\pip.ps1 list
+#   .\pip.ps1 uninstall requests
+# ============================================================
+Set-Location -Path $PSScriptRoot
+
+$VENV_DIR = '__VENV_DIR__'
+$PY = Join-Path $PSScriptRoot "$VENV_DIR\Scripts\python.exe"
+
+if (-not (Test-Path -LiteralPath $PY)) {
+    Write-Host "[ERROR] Local venv was not found:"
+    Write-Host "        `"$PY`""
+    Write-Host ""
+    Write-Host "Create it with:"
+    Write-Host "        python -m venv `"$VENV_DIR`""
+    Write-Host ""
+    Read-Host "Press Enter to exit" | Out-Null
+    exit 1
+}
+
+& $PY -m pip @args
+exit $LASTEXITCODE
+'''
+    return _render_ps1(
+        template,
+        GENERATOR_LINE=_GENERATOR_LINE,
+        GENERATED_ON=generated_on,
+        VENV_DIR=_ps1_escape(cfg.venv_dir),
+    )
+
+
+def make_shell_ps1(cfg: GeneratorConfig) -> str:
+    generated_on = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    template = r'''#Requires -Version 5.1
+# ============================================================
+# Project venv shell
+# __GENERATOR_LINE__
+# Generated on: __GENERATED_ON__
+#
+# Opens an activated PowerShell session for this project.
+# Use only when you need an interactive venv session.
+# Exit with: exit
+# ============================================================
+Set-Location -Path $PSScriptRoot
+
+$PROJECT_NAME = '__PROJECT_NAME__'
+$VENV_DIR     = '__VENV_DIR__'
+$ACTIVATE     = Join-Path $PSScriptRoot "$VENV_DIR\Scripts\Activate.ps1"
+
+if (-not (Test-Path -LiteralPath $ACTIVATE)) {
+    Write-Host "[ERROR] Local venv was not found:"
+    Write-Host "        `"$ACTIVATE`""
+    Write-Host ""
+    Write-Host "Create it with:"
+    Write-Host "        python -m venv `"$VENV_DIR`""
+    Write-Host ""
+    Read-Host "Press Enter to exit" | Out-Null
+    exit 1
+}
+
+$Host.UI.RawUI.WindowTitle = "$PROJECT_NAME - VENV SHELL"
+
+try {
+    . $ACTIVATE
+} catch {
+    Write-Host "[ERROR] Could not activate the venv — this is usually a PowerShell"
+    Write-Host "        execution-policy restriction, not a problem with the venv itself."
+    Write-Host "        Try running this once in the session, then re-run shell.ps1:"
+    Write-Host "          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass"
+    Read-Host "Press Enter to exit" | Out-Null
+    exit 1
+}
+
+Write-Host "============================================================"
+Write-Host " Project shell activated"
+Write-Host " Project: `"$PSScriptRoot`""
+Write-Host " Python :"
+(Get-Command python).Source
+Write-Host " Type 'exit' to leave this shell."
+Write-Host "============================================================"
+Write-Host ""
+powershell -NoExit
+'''
+    return _render_ps1(
+        template,
+        GENERATOR_LINE=_GENERATOR_LINE,
+        GENERATED_ON=generated_on,
+        PROJECT_NAME=_ps1_escape(cfg.project_name),
+        VENV_DIR=_ps1_escape(cfg.venv_dir),
+    )
+
+
+def make_sync_ps1(cfg: GeneratorConfig) -> str:
+    generated_on = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    if cfg.use_uv:
+        template = r'''#Requires -Version 5.1
+# ============================================================
+# Dependency Sync (uv)
+# __GENERATOR_LINE__
+# Generated on: __GENERATED_ON__
+# ============================================================
+Set-Location -Path $PSScriptRoot
+
+$PROJECT_NAME = '__PROJECT_NAME__'
+$VENV_DIR     = '__VENV_DIR__'
+$PY = Join-Path $PSScriptRoot "$VENV_DIR\Scripts\python.exe"
+
+if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
+    Write-Host "[ERROR] uv is not installed or not on PATH."
+    Write-Host "        Install with: pip install uv"
+    Write-Host "        https://github.com/astral-sh/uv"
+    Read-Host "Press Enter to exit" | Out-Null
+    exit 1
+}
+
+$Host.UI.RawUI.WindowTitle = "$PROJECT_NAME - SYNC (uv)"
+
+Write-Host "============================================================"
+Write-Host " Syncing: $PROJECT_NAME  [uv]"
+Write-Host "============================================================"
+Write-Host ""
+
+if (Test-Path -LiteralPath "uv.lock") {
+    Write-Host "[1/2] Running uv sync (uv.lock detected)..."
+    Write-Host "============================================================"
+    uv sync
+    Write-Host ""
+} elseif (Test-Path -LiteralPath "pyproject.toml") {
+    Write-Host "[1/2] Running uv sync (pyproject.toml detected)..."
+    Write-Host "============================================================"
+    uv sync
+    Write-Host ""
+} elseif (Test-Path -LiteralPath "requirements.txt") {
+    Write-Host "[1/2] Installing from requirements.txt..."
+    Write-Host "============================================================"
+    uv pip install --python $PY -r requirements.txt
+    Write-Host ""
+} else {
+    Write-Host "[WARN] No uv.lock, pyproject.toml, or requirements.txt found."
+    Write-Host "       Nothing to sync."
+    Write-Host ""
+}
+
+Write-Host "[2/2] Dependency health check..."
+Write-Host "============================================================"
+uv pip check --python $PY
+Write-Host ""
+
+Write-Host "============================================================"
+Write-Host " SYNC COMPLETE  (uv)"
+Write-Host "============================================================"
+Read-Host "Press Enter to continue" | Out-Null
+exit 0
+'''
+    else:
+        template = r'''#Requires -Version 5.1
+# ============================================================
+# Dependency Sync (pip)
+# __GENERATOR_LINE__
+# Generated on: __GENERATED_ON__
+# ============================================================
+Set-Location -Path $PSScriptRoot
+
+$PROJECT_NAME = '__PROJECT_NAME__'
+$VENV_DIR     = '__VENV_DIR__'
+$PY = Join-Path $PSScriptRoot "$VENV_DIR\Scripts\python.exe"
+
+if (-not (Test-Path -LiteralPath $PY)) {
+    Write-Host "[ERROR] Local venv not found: `"$PY`""
+    Write-Host ""
+    Write-Host "Create it with:"
+    Write-Host "  python -m venv `"$VENV_DIR`""
+    Read-Host "Press Enter to exit" | Out-Null
+    exit 1
+}
+
+$Host.UI.RawUI.WindowTitle = "$PROJECT_NAME - SYNC"
+
+Write-Host "============================================================"
+Write-Host " Syncing: $PROJECT_NAME"
+Write-Host " Python : $PY"
+Write-Host "============================================================"
+Write-Host ""
+
+Write-Host "[1/3] Upgrading pip..."
+Write-Host "============================================================"
+& $PY -m pip install --upgrade pip
+Write-Host ""
+
+if (Test-Path -LiteralPath "requirements.txt") {
+    Write-Host "[2/3] Installing from requirements.txt..."
+    Write-Host "============================================================"
+    & $PY -m pip install -r requirements.txt
+    Write-Host ""
+} else {
+    Write-Host "[2/3] SKIPPED: No requirements.txt found."
+    Write-Host "      Create one with: .\pip.ps1 freeze > requirements.txt"
+    Write-Host ""
+}
+
+Write-Host "[3/3] Dependency health check..."
+Write-Host "============================================================"
+& $PY -m pip check
+Write-Host ""
+
+Write-Host "============================================================"
+Write-Host " SYNC COMPLETE"
+Write-Host "============================================================"
+Read-Host "Press Enter to continue" | Out-Null
+exit 0
+'''
+    return _render_ps1(
+        template,
+        GENERATOR_LINE=_GENERATOR_LINE,
+        GENERATED_ON=generated_on,
+        PROJECT_NAME=_ps1_escape(cfg.project_name),
+        VENV_DIR=_ps1_escape(cfg.venv_dir),
+    )
+
+
+def make_doctor_ps1(cfg: GeneratorConfig) -> str:
+    generated_on = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    uv_block = ""
+    if cfg.use_uv:
+        uv_block = r'''
+Write-Host "------------------------------------------------------------"
+Write-Host " uv status"
+Write-Host "------------------------------------------------------------"
+if (Get-Command uv -ErrorAction SilentlyContinue) {
+    uv --version
+    Write-Host "[OK] uv is available."
+} else {
+    Write-Host "[WARN] uv not found on PATH."
+    Write-Host "       Install: pip install uv"
+}
+Write-Host ""
+'''
+
+    webengine_block = ""
+    if cfg.include_webengine_check:
+        webengine_block = r'''
+Write-Host "------------------------------------------------------------"
+Write-Host " PyQt6 WebEngine Check"
+Write-Host "------------------------------------------------------------"
+& $PY -c "from PyQt6 import QtCore; print('PyQt:', QtCore.PYQT_VERSION_STR); print('Qt  :', QtCore.QT_VERSION_STR); from PyQt6.QtWebEngineWidgets import QWebEngineView; print('[OK] WebEngine imported successfully.')" 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[FAIL] PyQt6 WebEngine check failed."
+    Write-Host "       Run manually for full traceback:"
+    Write-Host "       & `"$PY`" -c `"from PyQt6.QtWebEngineWidgets import QWebEngineView`""
+} else {
+    Write-Host "[OK] PyQt6 WebEngine is available."
+}
+Write-Host ""
+'''
+
+    template = r'''#Requires -Version 5.1
+# ============================================================
+# Project Doctor
+# __GENERATOR_LINE__
+# Generated on: __GENERATED_ON__
+# ============================================================
+Set-Location -Path $PSScriptRoot
+
+$PROJECT_NAME = '__PROJECT_NAME__'
+$VENV_DIR     = '__VENV_DIR__'
+$ENTRY_MODE   = '__ENTRY_MODE__'
+$APP_ENTRY    = '__APP_ENTRY__'
+$RUNNER_ARGS  = '__RUNNER_ARGS__'
+$PY = Join-Path $PSScriptRoot "$VENV_DIR\Scripts\python.exe"
+
+Write-Host "============================================================"
+Write-Host " PROJECT DOCTOR: $PROJECT_NAME"
+Write-Host "============================================================"
+Write-Host " Project : $PSScriptRoot"
+Write-Host " Mode    : $ENTRY_MODE"
+Write-Host " Entry   : $APP_ENTRY"
+if ($ENTRY_MODE -eq "runner") { Write-Host " Args    : $RUNNER_ARGS" }
+Write-Host ""
+
+if (-not (Test-Path -LiteralPath $PY)) {
+    Write-Host "[FAIL] venv not found at: `"$PY`""
+    Write-Host ""
+    Write-Host "Create it with:"
+    Write-Host "  python -m venv `"$VENV_DIR`""
+    Read-Host "Press Enter to exit" | Out-Null
+    exit 1
+}
+
+Write-Host "[OK] venv found: `"$PY`""
+Write-Host ""
+
+Write-Host "------------------------------------------------------------"
+Write-Host " Python Environment"
+Write-Host "------------------------------------------------------------"
+& $PY -c "import sys; print('Executable :', sys.executable); print('Version    :', sys.version.split()[0]); print('Prefix     :', sys.prefix)"
+Write-Host ""
+
+Write-Host "------------------------------------------------------------"
+Write-Host " pip version"
+Write-Host "------------------------------------------------------------"
+& $PY -m pip --version
+Write-Host ""
+__UV_BLOCK__
+Write-Host "------------------------------------------------------------"
+Write-Host " Installed Packages"
+Write-Host "------------------------------------------------------------"
+& $PY -m pip list
+Write-Host ""
+
+Write-Host "------------------------------------------------------------"
+Write-Host " Dependency Health"
+Write-Host "------------------------------------------------------------"
+& $PY -m pip check
+Write-Host ""
+
+Write-Host "------------------------------------------------------------"
+Write-Host " Entry Point Check"
+Write-Host "------------------------------------------------------------"
+if ($ENTRY_MODE -eq "file") {
+    if (Test-Path -LiteralPath $APP_ENTRY) {
+        Write-Host "[OK] Entry file found: `"$APP_ENTRY`""
+    } else {
+        Write-Host "[FAIL] Entry file NOT found: `"$APP_ENTRY`""
+    }
+} else {
+    & $PY -c "import importlib.util, sys; name=sys.argv[1]; spec=importlib.util.find_spec(name); print(('[OK] Module found: ' if spec else '[FAIL] Module NOT found: ') + name); sys.exit(0 if spec else 1)" $APP_ENTRY 2>$null
+    if ($LASTEXITCODE -ne 0) { Write-Host "[FAIL] Module import test failed." }
+    if ($ENTRY_MODE -eq "runner") { Write-Host "[INFO] Runner args: `"$RUNNER_ARGS`"" }
+}
+Write-Host ""
+
+Write-Host "------------------------------------------------------------"
+Write-Host " Project Files"
+Write-Host "------------------------------------------------------------"
+if (Test-Path -LiteralPath "uv.lock")          { Write-Host "[OK]   uv.lock found" }
+if (Test-Path -LiteralPath "pyproject.toml")   { Write-Host "[OK]   pyproject.toml found" }
+if (Test-Path -LiteralPath "requirements.txt") { Write-Host "[OK]   requirements.txt found" } else { Write-Host "[WARN] requirements.txt missing" }
+Write-Host ""
+__WEBENGINE_BLOCK__
+Write-Host "============================================================"
+Write-Host " DOCTOR COMPLETE"
+Write-Host "============================================================"
+Read-Host "Press Enter to continue" | Out-Null
+exit 0
+'''
+    return _render_ps1(
+        template,
+        GENERATOR_LINE=_GENERATOR_LINE,
+        GENERATED_ON=generated_on,
+        PROJECT_NAME=_ps1_escape(cfg.project_name),
+        VENV_DIR=_ps1_escape(cfg.venv_dir),
+        ENTRY_MODE=_ps1_escape(cfg.entry_mode),
+        APP_ENTRY=_ps1_escape(cfg.app_entry),
+        RUNNER_ARGS=_ps1_escape(cfg.runner_args),
+        UV_BLOCK=uv_block,
+        WEBENGINE_BLOCK=webengine_block,
+    )
+
+
+def make_test_ps1(cfg: GeneratorConfig) -> str:
+    generated_on = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    template = r'''#Requires -Version 5.1
+# ============================================================
+# Project test runner
+# __GENERATOR_LINE__
+# Generated on: __GENERATED_ON__
+#
+# Runs pytest via the project-local venv Python.
+#
+# Usage:
+#   .\test.ps1                        (run all tests)
+#   .\test.ps1 tests/test_core.py     (run a specific file)
+#   .\test.ps1 -k mapper              (filter by name)
+#   .\test.ps1 -v --tb=short          (verbose with short tracebacks)
+# ============================================================
+Set-Location -Path $PSScriptRoot
+
+$PROJECT_NAME = '__PROJECT_NAME__'
+$VENV_DIR     = '__VENV_DIR__'
+$PY = Join-Path $PSScriptRoot "$VENV_DIR\Scripts\python.exe"
+
+if (-not (Test-Path -LiteralPath $PY)) {
+    Write-Host "[ERROR] Local venv was not found:"
+    Write-Host "        `"$PY`""
+    Write-Host ""
+    Read-Host "Press Enter to exit" | Out-Null
+    exit 1
+}
+
+$Host.UI.RawUI.WindowTitle = "$PROJECT_NAME - TEST"
+Write-Host "============================================================"
+Write-Host " Testing: `"$PROJECT_NAME`""
+Write-Host " Python : `"$PY`""
+Write-Host "============================================================"
+Write-Host ""
+& $PY -m pytest -v @args
+$EXITCODE = $LASTEXITCODE
+
+Write-Host ""
+Write-Host "============================================================"
+if ($EXITCODE -eq 0) {
+    Write-Host " TESTS PASSED"
+} else {
+    Write-Host " TESTS FAILED  (exit code: $EXITCODE)"
+}
+Write-Host "============================================================"
+Read-Host "Press Enter to continue" | Out-Null
+exit $EXITCODE
+'''
+    return _render_ps1(
+        template,
+        GENERATOR_LINE=_GENERATOR_LINE,
+        GENERATED_ON=generated_on,
+        PROJECT_NAME=_ps1_escape(cfg.project_name),
+        VENV_DIR=_ps1_escape(cfg.venv_dir),
+    )
+
+
+def make_setup_ps1(cfg: GeneratorConfig) -> str:
+    generated_on = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    if cfg.use_uv:
+        template = r'''#Requires -Version 5.1
+# ============================================================
+# Project Setup  (uv)
+# __GENERATOR_LINE__
+# Generated on: __GENERATED_ON__
+#
+# Run this once to bootstrap the project environment.
+# After setup, use run.ps1 to launch the project.
+# ============================================================
+Set-Location -Path $PSScriptRoot
+
+$PROJECT_NAME = '__PROJECT_NAME__'
+$VENV_DIR     = '__VENV_DIR__'
+
+$Host.UI.RawUI.WindowTitle = "$PROJECT_NAME - SETUP (uv)"
+
+Write-Host "============================================================"
+Write-Host " Setting up: $PROJECT_NAME  [uv]"
+Write-Host "============================================================"
+Write-Host ""
+
+if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
+    Write-Host "[ERROR] uv is not installed or not on PATH."
+    Write-Host ""
+    Write-Host "Install uv first:"
+    Write-Host "  pip install uv"
+    Write-Host "  or visit: https://github.com/astral-sh/uv"
+    Write-Host ""
+    Read-Host "Press Enter to exit" | Out-Null
+    exit 1
+}
+
+if (Test-Path -LiteralPath (Join-Path $VENV_DIR "Scripts\python.exe")) {
+    Write-Host "[INFO] Virtual environment already exists at `"$VENV_DIR\`""
+    Write-Host "       Delete it first to re-run setup."
+    Write-Host ""
+    Read-Host "Press Enter to exit" | Out-Null
+    exit 0
+}
+
+Write-Host "[1/3] Creating virtual environment with uv..."
+Write-Host "============================================================"
+uv venv $VENV_DIR
+Write-Host ""
+
+Write-Host "[2/3] Syncing dependencies..."
+Write-Host "============================================================"
+if (Test-Path -LiteralPath "uv.lock") {
+    uv sync
+} elseif (Test-Path -LiteralPath "pyproject.toml") {
+    uv sync
+} elseif (Test-Path -LiteralPath "requirements.txt") {
+    uv pip install --python (Join-Path $VENV_DIR "Scripts\python.exe") -r requirements.txt
+} else {
+    Write-Host "[WARN] No uv.lock, pyproject.toml, or requirements.txt found."
+    Write-Host "       Add dependencies then run sync.ps1 to install them."
+}
+Write-Host ""
+
+Write-Host "[3/3] Verifying environment..."
+Write-Host "============================================================"
+& (Join-Path $VENV_DIR "Scripts\python.exe") --version
+Write-Host ""
+
+Write-Host "============================================================"
+Write-Host " SETUP COMPLETE"
+Write-Host " Run run.ps1 to launch the project."
+Write-Host "============================================================"
+Read-Host "Press Enter to continue" | Out-Null
+exit 0
+'''
+    else:
+        template = r'''#Requires -Version 5.1
+# ============================================================
+# Project Setup
+# __GENERATOR_LINE__
+# Generated on: __GENERATED_ON__
+#
+# Run this once to bootstrap the project environment.
+# After setup, use run.ps1 to launch the project.
+# ============================================================
+Set-Location -Path $PSScriptRoot
+
+$PROJECT_NAME = '__PROJECT_NAME__'
+$VENV_DIR     = '__VENV_DIR__'
+
+$Host.UI.RawUI.WindowTitle = "$PROJECT_NAME - SETUP"
+
+Write-Host "============================================================"
+Write-Host " Setting up: $PROJECT_NAME"
+Write-Host "============================================================"
+Write-Host ""
+
+if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
+    Write-Host "[ERROR] Python is not installed or not on PATH."
+    Write-Host ""
+    Write-Host "Install Python from https://www.python.org/downloads/"
+    Write-Host "Make sure to check `"Add Python to PATH`" during installation."
+    Write-Host ""
+    Read-Host "Press Enter to exit" | Out-Null
+    exit 1
+}
+
+if (Test-Path -LiteralPath (Join-Path $VENV_DIR "Scripts\python.exe")) {
+    Write-Host "[INFO] Virtual environment already exists at `"$VENV_DIR\`""
+    Write-Host "       Delete it first to re-run setup."
+    Write-Host ""
+    Read-Host "Press Enter to exit" | Out-Null
+    exit 0
+}
+
+Write-Host "[1/3] Creating virtual environment..."
+Write-Host "============================================================"
+python -m venv $VENV_DIR
+Write-Host ""
+
+Write-Host "[2/3] Upgrading pip..."
+Write-Host "============================================================"
+& (Join-Path $VENV_DIR "Scripts\python.exe") -m pip install --upgrade pip
+Write-Host ""
+
+if (Test-Path -LiteralPath "requirements.txt") {
+    Write-Host "[3/3] Installing dependencies from requirements.txt..."
+    Write-Host "============================================================"
+    & (Join-Path $VENV_DIR "Scripts\python.exe") -m pip install -r requirements.txt
+    Write-Host ""
+} else {
+    Write-Host "[3/3] SKIPPED: No requirements.txt found."
+    Write-Host "       Add dependencies then run sync.ps1 to install them."
+    Write-Host ""
+}
+
+Write-Host "============================================================"
+Write-Host " SETUP COMPLETE"
+Write-Host " Run run.ps1 to launch the project."
+Write-Host "============================================================"
+Read-Host "Press Enter to continue" | Out-Null
+exit 0
+'''
+    return _render_ps1(
+        template,
+        GENERATOR_LINE=_GENERATOR_LINE,
+        GENERATED_ON=generated_on,
+        PROJECT_NAME=_ps1_escape(cfg.project_name),
+        VENV_DIR=_ps1_escape(cfg.venv_dir),
+    )
 
 
 def make_setup_bat(cfg: GeneratorConfig) -> str:
@@ -1410,12 +2144,21 @@ def make_self_unpacking_setup_bat(cfg: GeneratorConfig) -> str:
         companions["doctor.sh"] = make_doctor_sh(cfg)
         if cfg.include_test_bat:
             companions["test.sh"] = make_test_sh(cfg)
+    if cfg.include_powershell:
+        companions["run.ps1"]    = make_run_ps1(cfg)
+        companions["pip.ps1"]    = make_pip_ps1(cfg)
+        companions["shell.ps1"]  = make_shell_ps1(cfg)
+        companions["sync.ps1"]   = make_sync_ps1(cfg)
+        companions["doctor.ps1"] = make_doctor_ps1(cfg)
+        if cfg.include_test_bat:
+            companions["test.ps1"] = make_test_ps1(cfg)
 
     # Build the decode block for each companion
-    # .bat files → CRLF,  .sh files → LF
+    # .bat/.ps1 files → CRLF,  .sh files → LF
     decode_blocks: list[str] = []
     for filename, content in companions.items():
         is_sh   = filename.endswith(".sh")
+        is_ps1  = filename.endswith(".ps1")
         endings = "\n" if is_sh else "\r\n"
         b64     = _b64_encode(content, line_endings=endings)
 
@@ -1423,10 +2166,15 @@ def make_self_unpacking_setup_bat(cfg: GeneratorConfig) -> str:
         lines = [b64[i:i+76] for i in range(0, len(b64), 76)]
         b64_lines = "\r\n".join(lines)
 
-        chmod_note = (
-            "\r\n    echo [INFO] Remember to chmod +x %OUTFILE% if using on Linux/macOS."
-            if is_sh else ""
-        )
+        if is_sh:
+            chmod_note = "\r\n    echo [INFO] Remember to chmod +x %OUTFILE% if using on Linux/macOS."
+        elif is_ps1:
+            chmod_note = (
+                "\r\n    echo [INFO] If PowerShell blocks scripts, run: "
+                "Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass"
+            )
+        else:
+            chmod_note = ""
 
         block = (
             f"rem ── {filename} ─────────────────────────────────────────────────\r\n"
@@ -1638,6 +2386,17 @@ def build_previews(cfg: GeneratorConfig) -> dict[str, str]:
         if cfg.include_setup:
             previews["setup.sh"] = make_setup_sh(cfg)
 
+    if cfg.include_powershell:
+        previews["run.ps1"]    = make_run_ps1(cfg)
+        previews["pip.ps1"]    = make_pip_ps1(cfg)
+        previews["shell.ps1"]  = make_shell_ps1(cfg)
+        previews["sync.ps1"]   = make_sync_ps1(cfg)
+        previews["doctor.ps1"] = make_doctor_ps1(cfg)
+        if cfg.include_test_bat:
+            previews["test.ps1"] = make_test_ps1(cfg)
+        if cfg.include_setup:
+            previews["setup.ps1"] = make_setup_ps1(cfg)
+
     return previews
 
 
@@ -1659,7 +2418,7 @@ def generate_files(cfg: GeneratorConfig) -> list[Path]:
             )
         is_sh = filename.endswith(".sh")
         path.write_text(content, encoding="utf-8", newline="\n" if is_sh else "\r\n")
-        if is_sh:
+        if is_sh or filename.endswith(".ps1"):
             current = _os.stat(path).st_mode
             _os.chmod(path, current | _stat.S_IXUSR | _stat.S_IXGRP | _stat.S_IXOTH)
         written.append(path)
@@ -1692,6 +2451,77 @@ def create_venv(cfg: GeneratorConfig) -> None:
             cwd=str(cfg.project_dir),
             check=True,
         )
+
+
+# ---------------------------------------------------------------------------
+# Drift detection (`--check` / `check` subcommand)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class DriftEntry:
+    """One companion file's drift status against what cfg would currently
+    generate. `expected` and `actual` are both LF-normalized text with the
+    'Generated on: <timestamp>' line blanked out (see _normalize_for_drift),
+    suitable for diffing directly regardless of the file's on-disk newline
+    style or when it happened to be generated."""
+    filename: str
+    status:   str  # "match" | "drifted" | "missing"
+    expected: str
+    actual:   str | None
+
+
+_TIMESTAMP_RE = re.compile(r"^((?:rem|#)\s*Generated on:).*$", re.MULTILINE)
+
+
+def _normalize_for_drift(text: str) -> str:
+    """Blank out the 'Generated on: <timestamp>' line before comparing.
+    Every regeneration stamps the current time, so without this, `check`
+    would report drift on every single file every time it's run — even
+    with zero actual setting changes."""
+    return _TIMESTAMP_RE.sub(r"\1 <normalized>", text)
+
+
+def check_drift(cfg: GeneratorConfig) -> list[DriftEntry]:
+    """
+    Compare what generate_files(cfg) would currently produce against what's
+    already on disk in cfg.project_dir, without writing anything.
+
+    Returns one DriftEntry per file build_previews(cfg) would generate.
+    requirements.txt is intentionally excluded — it's a one-time stub seed
+    file the user is expected to edit, not a maintained template, so drift
+    there isn't meaningful.
+
+    The "Generated on: <timestamp>" line every template stamps is ignored
+    for comparison purposes (see _normalize_for_drift) — otherwise every
+    file would show as drifted on every run regardless of real changes.
+    """
+    previews = build_previews(cfg)
+    entries: list[DriftEntry] = []
+
+    for filename, content in previews.items():
+        path = cfg.project_dir / filename
+        is_sh = filename.endswith(".sh")
+        newline = "\n" if is_sh else "\r\n"
+        expected_normalized = _normalize_for_drift(content)
+        expected_bytes = expected_normalized.replace("\n", newline).encode("utf-8")
+
+        if not path.exists():
+            entries.append(DriftEntry(filename, "missing", expected_normalized, None))
+            continue
+
+        actual_bytes_raw = path.read_bytes()
+        actual_text = actual_bytes_raw.decode("utf-8", errors="replace")
+        actual_normalized_nl = actual_text.replace("\r\n", "\n")
+        actual_normalized = _normalize_for_drift(actual_normalized_nl)
+        actual_comparable = actual_normalized.replace("\n", newline).encode("utf-8")
+
+        if actual_comparable == expected_bytes:
+            entries.append(DriftEntry(filename, "match", expected_normalized, actual_normalized))
+            continue
+
+        entries.append(DriftEntry(filename, "drifted", expected_normalized, actual_normalized))
+
+    return entries
 
 
 # ---------------------------------------------------------------------------
@@ -1831,6 +2661,7 @@ _PRESET_FIELDS = (
     "include_test_bat",
     "use_uv",
     "include_posix",
+    "include_powershell",
     "include_setup",
     "self_unpack",
 )

@@ -44,6 +44,23 @@ class TestBuildPreviews:
         cfg = cfg_factory(include_posix=True, include_test_bat=False)
         assert "test.sh" not in build_previews(cfg)
 
+    def test_powershell_scripts_added_when_flagged(self, cfg_factory):
+        cfg = cfg_factory(include_powershell=True, include_test_bat=True, include_setup=True)
+        previews = build_previews(cfg)
+        for name in ("run.ps1", "pip.ps1", "shell.ps1", "sync.ps1", "doctor.ps1",
+                     "test.ps1", "setup.ps1"):
+            assert name in previews
+
+    def test_no_powershell_test_ps1_without_test_bat_flag(self, cfg_factory):
+        cfg = cfg_factory(include_powershell=True, include_test_bat=False)
+        assert "test.ps1" not in build_previews(cfg)
+
+    def test_posix_and_powershell_are_independent(self, cfg_factory):
+        cfg = cfg_factory(include_posix=True, include_powershell=False)
+        previews = build_previews(cfg)
+        assert "run.sh" in previews
+        assert "run.ps1" not in previews
+
     def test_self_unpack_returns_only_setup_bat(self, cfg_factory):
         cfg = cfg_factory(self_unpack=True, include_test_bat=True, include_posix=True)
         previews = build_previews(cfg)
@@ -90,6 +107,22 @@ class TestGenerateFiles:
         cfg = cfg_factory(include_posix=True)
         generate_files(cfg)
         mode = os.stat(tmp_path / "run.sh").st_mode
+        assert mode & stat.S_IXUSR
+
+    def test_ps1_files_written_with_crlf(self, cfg_factory, tmp_path):
+        cfg = cfg_factory(include_powershell=True)
+        generate_files(cfg)
+        raw = (tmp_path / "run.ps1").read_bytes()
+        assert b"\r\n" in raw
+
+    def test_ps1_files_marked_executable(self, cfg_factory, tmp_path):
+        # Mainly useful for `pwsh` on Linux/macOS (`./run.ps1`); harmless
+        # no-op on Windows/NTFS for the same reason as .sh above.
+        if sys.platform == "win32":
+            pytest.skip("execute bit is not a meaningful concept on Windows/NTFS")
+        cfg = cfg_factory(include_powershell=True)
+        generate_files(cfg)
+        mode = os.stat(tmp_path / "run.ps1").st_mode
         assert mode & stat.S_IXUSR
 
     def test_bat_files_not_forced_executable_bit_untouched(self, base_cfg, tmp_path):

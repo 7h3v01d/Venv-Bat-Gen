@@ -1,2 +1,2 @@
-python -m pytest -v
+.venv\Scripts\python.exe -m pytest tests\ -v
 pause

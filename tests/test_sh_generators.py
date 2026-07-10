@@ -6,6 +6,11 @@ make_doctor_sh, make_test_sh, make_setup_sh.
 
 from __future__ import annotations
 
+import shutil
+import subprocess
+
+import pytest
+
 from venv_bat_gen.core import (
     make_doctor_sh,
     make_pip_sh,
@@ -159,6 +164,39 @@ class TestMakeTestSh:
         content = make_test_sh(base_cfg)
         assert "TESTS PASSED" in content
         assert "TESTS FAILED" in content
+
+    def test_pytest_invocation_is_guarded_against_set_e_early_exit(self, base_cfg):
+        # Regression test: `set -euo pipefail` is active in this script. An
+        # unguarded `"$PY" -m pytest ...` followed by a bare `EXITCODE=$?`
+        # on the next line would make bash abort the *entire script* the
+        # instant pytest returns non-zero — before EXITCODE=$? or the
+        # PASSED/FAILED banner below it ever runs. The `|| EXITCODE=$?`
+        # guard (with EXITCODE pre-declared) is what prevents that.
+        content = make_test_sh(base_cfg)
+        assert "EXITCODE=0" in content
+        assert '"$PY" -m pytest -v "$@" || EXITCODE=$?' in content
+
+    @pytest.mark.skipif(shutil.which("bash") is None, reason="requires bash")
+    def test_failed_tests_still_print_banner_and_propagate_exit_code(self, cfg_factory, tmp_path):
+        # End-to-end proof the guard actually works at runtime, not just
+        # that the right-looking text is present in the template.
+        bin_dir = tmp_path / ".venv" / "bin"
+        bin_dir.mkdir(parents=True)
+        fake_python = bin_dir / "python"
+        fake_python.write_text("#!/usr/bin/env bash\necho 'pretend pytest run'\nexit 1\n")
+        fake_python.chmod(0o755)
+
+        cfg = cfg_factory(pause_on_exit=False)
+        test_sh = tmp_path / "test.sh"
+        test_sh.write_text(make_test_sh(cfg))
+        test_sh.chmod(0o755)
+
+        result = subprocess.run(
+            ["bash", str(test_sh)], cwd=tmp_path, capture_output=True, text=True,
+        )
+        assert result.returncode == 1
+        assert "TESTS FAILED" in result.stdout
+        assert "(exit code: 1)" in result.stdout
 
 
 # ---------------------------------------------------------------------------

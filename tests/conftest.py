@@ -29,6 +29,7 @@ def make_config(tmp_path: Path, **overrides) -> GeneratorConfig:
         include_test_bat=False,
         use_uv=False,
         include_posix=False,
+        include_powershell=False,
         include_setup=False,
         self_unpack=False,
     )

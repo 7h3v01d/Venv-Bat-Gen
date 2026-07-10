@@ -224,6 +224,11 @@ class TestGenerateSuccess:
         capsys.readouterr()
         assert (project / "run.sh").exists()
 
+    def test_powershell_flag_adds_ps1_files(self, project, capsys):
+        run_cli(["generate", str(project), "--powershell"])
+        capsys.readouterr()
+        assert (project / "run.ps1").exists()
+
     def test_creates_folder_if_missing(self, tmp_path, capsys):
         folder = tmp_path / "not_yet_created"
         code = run_cli(["generate", str(folder), "--entry", "main.py"])
@@ -279,6 +284,16 @@ class TestSelfUnpackTip:
         out = _strip_ansi(capsys.readouterr().out)
         assert "run.sh" in out
 
+    def test_tip_includes_powershell_when_flagged(self, project, capsys):
+        run_cli(["generate", str(project), "--self-unpack", "--powershell"])
+        out = _strip_ansi(capsys.readouterr().out)
+        assert "run.ps1" in out
+
+    def test_tip_includes_test_ps1_only_when_both_flagged(self, project, capsys):
+        run_cli(["generate", str(project), "--self-unpack", "--powershell", "--test"])
+        out = _strip_ansi(capsys.readouterr().out)
+        assert "test.ps1" in out
+
     def test_self_unpack_only_writes_setup_bat(self, project, capsys):
         run_cli(["generate", str(project), "--self-unpack"])
         capsys.readouterr()
@@ -317,6 +332,97 @@ class TestCreateVenvFlag:
         err = _strip_ansi(capsys.readouterr().err)
         assert "venv creation failed" in err
         assert "simulated venv failure" in err
+
+
+# ---------------------------------------------------------------------------
+# check subcommand
+# ---------------------------------------------------------------------------
+
+class TestCheckCommand:
+    def test_reports_all_missing_before_generate(self, project, capsys):
+        code = run_cli(["check", str(project), "--entry", "main.py"])
+        assert code == 1
+        out = _strip_ansi(capsys.readouterr().out)
+        assert "missing" in out
+        assert "run.bat" in out
+
+    def test_writes_nothing_to_disk(self, project, capsys):
+        run_cli(["check", str(project), "--entry", "main.py"])
+        capsys.readouterr()
+        assert list(project.iterdir()) == []
+
+    def test_exits_zero_when_up_to_date(self, project, capsys):
+        run_cli(["generate", str(project), "--entry", "main.py"])
+        capsys.readouterr()
+        code = run_cli(["check", str(project), "--entry", "main.py"])
+        assert code == 0
+        out = _strip_ansi(capsys.readouterr().out)
+        assert "Up to date" in out
+
+    def test_exits_one_when_settings_have_drifted(self, project, capsys):
+        run_cli(["generate", str(project), "--name", "Original", "--entry", "main.py"])
+        capsys.readouterr()
+        code = run_cli(["check", str(project), "--name", "Renamed", "--entry", "main.py"])
+        assert code == 1
+        out = _strip_ansi(capsys.readouterr().out)
+        assert "Drift detected" in out
+        assert "drifted" in out
+
+    def test_diff_flag_shows_unified_diff_of_real_changes(self, project, capsys):
+        run_cli(["generate", str(project), "--name", "Original", "--entry", "main.py"])
+        capsys.readouterr()
+        run_cli(["check", str(project), "--name", "Renamed", "--entry", "main.py", "--diff"])
+        out = _strip_ansi(capsys.readouterr().out)
+        assert "-set \"PROJECT_NAME=Original\"" in out
+        assert "+set \"PROJECT_NAME=Renamed\"" in out
+
+    def test_diff_flag_omitted_by_default(self, project, capsys):
+        run_cli(["generate", str(project), "--name", "Original", "--entry", "main.py"])
+        capsys.readouterr()
+        run_cli(["check", str(project), "--name", "Renamed", "--entry", "main.py"])
+        out = _strip_ansi(capsys.readouterr().out)
+        assert "@@" not in out  # no unified-diff hunk markers without --diff
+
+    def test_no_false_drift_from_timestamp_alone(self, project, capsys, monkeypatch):
+        import venv_bat_gen.core as core_module
+        from datetime import datetime as real_datetime
+
+        run_cli(["generate", str(project), "--entry", "main.py"])
+        capsys.readouterr()
+
+        class _LaterDatetime(real_datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return real_datetime(2099, 1, 1, 0, 0)
+
+        monkeypatch.setattr(core_module, "datetime", _LaterDatetime)
+        code = run_cli(["check", str(project), "--entry", "main.py"])
+        assert code == 0
+
+    def test_mutex_flags_rejected_same_as_generate(self, project, capsys):
+        code = run_cli(["check", str(project), "--self-unpack", "--setup"])
+        assert code == 1
+        err = _strip_ansi(capsys.readouterr().err)
+        assert "mutually exclusive" in err
+
+    def test_invalid_module_name_rejected_same_as_generate(self, project, capsys):
+        code = run_cli(["check", str(project), "--module", "--entry", "not-a-module"])
+        assert code == 1
+        err = _strip_ansi(capsys.readouterr().err)
+        assert "Invalid module name" in err
+
+    def test_respects_preset(self, project, capsys):
+        run_cli(["generate", str(project), "--preset", "FastAPI / Uvicorn"])
+        capsys.readouterr()
+        code = run_cli(["check", str(project), "--preset", "FastAPI / Uvicorn"])
+        assert code == 0
+
+    def test_help_mentions_exit_codes(self, capsys):
+        code = run_cli(["check", "--help"])
+        assert code == 0
+        out = capsys.readouterr().out
+        assert "Exits 0" in out
+        assert "exits 1" in out
 
 
 # ---------------------------------------------------------------------------

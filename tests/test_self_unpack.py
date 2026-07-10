@@ -13,6 +13,7 @@ from venv_bat_gen.core import (
     make_doctor_bat,
     make_pip_bat,
     make_run_bat,
+    make_run_ps1,
     make_run_sh,
     make_self_unpacking_setup_bat,
     make_shell_bat,
@@ -61,6 +62,30 @@ class TestSelfUnpackingSetupBat:
         with_flag = cfg_factory(self_unpack=True, include_posix=True)
         assert 'OUTFILE=run.sh' not in make_self_unpacking_setup_bat(without)
         assert 'OUTFILE=run.sh' in make_self_unpacking_setup_bat(with_flag)
+
+    def test_powershell_scripts_only_embedded_when_flagged(self, cfg_factory):
+        without = cfg_factory(self_unpack=True, include_powershell=False)
+        with_flag = cfg_factory(self_unpack=True, include_powershell=True)
+        assert 'OUTFILE=run.ps1' not in make_self_unpacking_setup_bat(without)
+        assert 'OUTFILE=run.ps1' in make_self_unpacking_setup_bat(with_flag)
+
+    def test_powershell_test_ps1_only_embedded_when_both_flagged(self, cfg_factory):
+        cfg = cfg_factory(self_unpack=True, include_powershell=True, include_test_bat=True)
+        assert 'OUTFILE=test.ps1' in make_self_unpacking_setup_bat(cfg)
+
+        cfg_no_test = cfg_factory(self_unpack=True, include_powershell=True, include_test_bat=False)
+        assert 'OUTFILE=test.ps1' not in make_self_unpacking_setup_bat(cfg_no_test)
+
+    def test_posix_and_powershell_can_both_be_embedded_together(self, cfg_factory):
+        cfg = cfg_factory(self_unpack=True, include_posix=True, include_powershell=True)
+        content = make_self_unpacking_setup_bat(cfg)
+        assert 'OUTFILE=run.sh' in content
+        assert 'OUTFILE=run.ps1' in content
+
+    def test_powershell_note_mentions_execution_policy(self, cfg_factory):
+        cfg = cfg_factory(self_unpack=True, include_powershell=True)
+        content = make_self_unpacking_setup_bat(cfg)
+        assert "Set-ExecutionPolicy" in content
 
     def test_existing_files_are_never_overwritten(self, base_cfg):
         content = make_self_unpacking_setup_bat(base_cfg)
@@ -115,6 +140,22 @@ class TestSelfUnpackingSetupBat:
         assert decoded == expected
         assert "\r\n" not in decoded
 
+    def test_ps1_payload_uses_crlf(self, cfg_factory):
+        cfg = cfg_factory(self_unpack=True, include_powershell=True)
+        setup_content = make_self_unpacking_setup_bat(cfg)
+        b64 = _extract_embedded_b64(setup_content, "run.ps1")
+        decoded = base64.b64decode(b64).decode("utf-8")
+        assert "\r\n" in decoded
+
+    def test_run_ps1_payload_round_trips(self, cfg_factory):
+        cfg = cfg_factory(self_unpack=True, include_powershell=True)
+        setup_content = make_self_unpacking_setup_bat(cfg)
+        b64 = _extract_embedded_b64(setup_content, "run.ps1")
+        decoded = base64.b64decode(b64).decode("utf-8")
+
+        expected = make_run_ps1(cfg).replace("\n", "\r\n")
+        assert decoded == expected
+
     def test_bat_payload_uses_crlf(self, base_cfg):
         setup_content = make_self_unpacking_setup_bat(base_cfg)
         b64 = _extract_embedded_b64(setup_content, "pip.bat")
@@ -125,7 +166,8 @@ class TestSelfUnpackingSetupBat:
         """Every embedded script, across the full feature matrix, decodes
         back to byte-identical content produced by its standalone maker."""
         cfg = cfg_factory(
-            self_unpack=True, include_test_bat=True, include_posix=True, use_uv=True,
+            self_unpack=True, include_test_bat=True, include_posix=True,
+            include_powershell=True, use_uv=True,
         )
         setup_content = make_self_unpacking_setup_bat(cfg)
 
@@ -136,6 +178,7 @@ class TestSelfUnpackingSetupBat:
             "sync.bat": make_sync_bat(cfg),
             "doctor.bat": make_doctor_bat(cfg),
             "test.bat": make_test_bat(cfg),
+            "run.ps1": make_run_ps1(cfg),
         }
         for filename, expected_lf in checks.items():
             b64 = _extract_embedded_b64(setup_content, filename)
