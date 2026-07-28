@@ -67,10 +67,15 @@ class TestMakeRunSh:
         content = make_run_sh(module_cfg)
         assert '"$PY" -m "$APP_ENTRY" "$@"' in content
 
-    def test_runner_mode_includes_runner_args_unquoted_for_word_splitting(self, runner_cfg):
+    def test_runner_mode_expands_args_as_quoted_array(self, runner_cfg):
+        # v3.5 regression guard: args are a literal bash array expanded with
+        # "${RUNNER_ARGS[@]}" — never the unquoted $RUNNER_ARGS string that
+        # word-split and glob-expanded against the project directory in v3.4.
         content = make_run_sh(runner_cfg)
         assert "$PY" in content
-        assert '$RUNNER_ARGS "$@"' in content
+        assert 'RUNNER_ARGS=(' in content
+        assert '${RUNNER_ARGS[@]+"${RUNNER_ARGS[@]}"}' in content
+        assert '$RUNNER_ARGS "$@"' not in content
 
     def test_pause_on_exit_true_adds_read_prompt(self, cfg_factory):
         cfg = cfg_factory(pause_on_exit=True)

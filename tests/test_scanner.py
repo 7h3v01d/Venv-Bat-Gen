@@ -92,8 +92,11 @@ class TestEntryPointSuggestion:
             'mytool = "mytool.cli:main"\n'
         )
         scan = scan_project_folder(tmp_path)
-        assert scan.suggested_entry_mode == "module"
-        assert scan.suggested_app_entry == "mytool.cli"
+        # v3.5: console scripts are suggested as script mode (venv binary),
+        # not `python -m` on the right-hand module — which silently does
+        # nothing when the module lacks a __main__ guard.
+        assert scan.suggested_entry_mode == "script"
+        assert scan.suggested_app_entry == "mytool"
 
     def test_fastapi_keyword_suggests_uvicorn_runner(self, tmp_path):
         (tmp_path / "pyproject.toml").write_text(

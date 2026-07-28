@@ -64,18 +64,22 @@ class TestMakeRunPs1:
 
     def test_file_mode_invokes_entry_directly(self, base_cfg):
         content = make_run_ps1(base_cfg)
-        assert "default { & $PY $APP_ENTRY @args }" in content
+        assert "default  { & $PY $APP_ENTRY @args }" in content
 
     def test_module_mode_uses_dash_m(self, module_cfg):
         content = make_run_ps1(module_cfg)
         assert '"module" { & $PY -m $APP_ENTRY @args }' in content
         assert "mypackage" in content
 
-    def test_runner_mode_splits_args_via_named_splat(self, runner_cfg):
+    def test_runner_mode_splats_literal_array(self, runner_cfg):
+        # v3.5 regression guard: args are a literal PS array splatted as-is —
+        # never re-split on whitespace at runtime (the v3.4 behaviour that
+        # made spaced arguments impossible).
         content = make_run_ps1(runner_cfg)
-        assert "$RunnerArgsArray = $RUNNER_ARGS -split" in content
-        assert "@RunnerArgsArray @args" in content
-        assert "app.main:app --host 0.0.0.0 --port 8000 --reload" in content
+        assert "-split '\\s+'" not in content
+        assert "$RUNNER_ARGS  = @(" in content
+        assert '"runner" { & $PY -m $APP_ENTRY @RUNNER_ARGS @args }' in content
+        assert "'app.main:app', '--host', '0.0.0.0', '--port', '8000', '--reload'" in content
 
     def test_pause_on_exit_true_adds_read_host(self, cfg_factory):
         cfg = cfg_factory(pause_on_exit=True)

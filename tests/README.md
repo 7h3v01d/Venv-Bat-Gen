@@ -42,12 +42,13 @@ If PyQt6 isn't installed, `pytest.importorskip("PyQt6")` at the top of the file 
 | `test_generate_files.py` | `build_previews()` dict shape and `generate_files()` disk-writing behavior (CRLF/LF, chmod +x, overwrite protection, requirements.txt) |
 | `test_scanner.py` | `scan_project_folder()` auto-detection heuristics (venv, uv, pyproject keywords, entry-file fallback) |
 | `test_presets.py` | `PresetManager` — built-ins, user save/delete, legacy-path migration, corrupt-storage resilience |
-| `test_escaping.py` | `bat_escape`, `_sh_escape`, `_b64_encode`, `MODULE_RE`, `RUNNER_ARGS_UNSAFE_RE` |
+| `test_escaping.py` | `bat_escape`, `_sh_escape`, `_b64_encode`, `MODULE_RE`, `SCRIPT_RE`, and the v3.5 runner-arg model (`parse_runner_args`, `runner_args_problem`, per-shell arg-vector emitters) |
 | `test_create_venv.py` | `create_venv()` uv-vs-stdlib decision logic (subprocess calls mocked) |
 | `test_check_drift.py` | `check_drift()` — missing/match/drifted classification, the timestamp-normalization fix, self-unpack scope, corrupted-file handling |
 | `test_gui_smoke.py` | Headless PyQt6/pytest-qt smoke tests for `gui.py`: window construction, checkbox wiring, live preview tab show/hide, preset save/apply round-trips. Requires `dev-gui` extra; auto-skips otherwise |
 | `test_gui_launcher.py` | `gui_launcher.main()` — friendly-error path when PyQt6 is missing (simulated via `sys.meta_path`, works whether or not PyQt6 is really installed) and delegation path when it's present |
-| `test_cli.py` | The full argparse layer: subcommands (`generate`/`check`/`scan`/`presets`), `--self-unpack`/`--setup` mutex, CLI > preset > scan > default priority resolution, `MODULE_RE`/`RUNNER_ARGS_UNSAFE_RE` validation, `--preview`, `--create-venv`, `check`'s `--diff` output and exit codes, and error handling around `generate_files`/`create_venv` |
+| `test_runner_launch_v35.py` | The v3.5.0 runner-launch overhaul: LIVE bash execution of generated `run.sh` (glob/space/`!`/`%` arg survival, empty-args `set -u` safety, script-mode dispatch, fail-closed missing script), static `run.bat`/`run.ps1` template guards (no delayed expansion, quoted literal arg vectors, `SCRIPT_EXE` branches), doctor script-mode checks, `[project.scripts]` scanner suggestions, and CLI `--script`/quoted-args end-to-end |
+| `test_cli.py` | The full argparse layer: subcommands (`generate`/`check`/`scan`/`presets`), `--self-unpack`/`--setup` mutex, CLI > preset > scan > default priority resolution, `MODULE_RE`/`SCRIPT_RE`/`runner_args_problem` validation, `--preview`, `--create-venv`, `check`'s `--diff` output and exit codes, and error handling around `generate_files`/`create_venv` |
 
 ## Notes for extending
 

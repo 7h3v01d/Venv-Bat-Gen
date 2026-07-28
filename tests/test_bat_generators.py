@@ -50,13 +50,13 @@ class TestMakeRunBat:
 
     def test_pause_on_exit_true_adds_pause(self, cfg_factory):
         cfg = cfg_factory(pause_on_exit=True)
-        assert "pause\nexit /b !EXITCODE!" in make_run_bat(cfg)
+        assert "pause\nexit /b %EXITCODE%" in make_run_bat(cfg)
 
     def test_pause_on_exit_false_omits_pause(self, cfg_factory):
         cfg = cfg_factory(pause_on_exit=False)
         content = make_run_bat(cfg)
-        assert "pause\nexit /b !EXITCODE!" not in content
-        assert "exit /b !EXITCODE!" in content
+        assert "pause\nexit /b %EXITCODE%" not in content
+        assert "exit /b %EXITCODE%" in content
 
     def test_venv_dir_is_reflected(self, cfg_factory):
         cfg = cfg_factory(venv_dir="env_custom")

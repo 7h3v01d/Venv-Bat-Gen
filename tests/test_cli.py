@@ -170,12 +170,12 @@ class TestValidation:
         assert "Invalid module name" in err
         assert list(project.iterdir()) == []
 
-    def test_unsafe_runner_args_rejected(self, project, capsys):
+    def test_unparseable_runner_args_rejected(self, project, capsys):
         code = run_cli(["generate", str(project), "--runner", "--entry", "uvicorn",
-                         "--runner-args", "app:app & del *.*"])
+                         "--runner-args", 'app:app --name "unbalanced'])
         assert code == 1
         err = _strip_ansi(capsys.readouterr().err)
-        assert "unsafe characters" in err
+        assert "Could not parse runner args" in err
 
     def test_safe_runner_args_accepted(self, project, capsys):
         code = run_cli(["generate", str(project), "--runner", "--entry", "uvicorn",
