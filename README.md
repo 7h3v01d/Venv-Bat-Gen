@@ -16,7 +16,7 @@ For every project, `venv-bat-gen` writes up to **18 scripts** (`.bat` for Window
 
 | Script | Purpose |
 |---|---|
-| `run.bat` / `run.sh` / `run.ps1` | Run your project — file, module, or runner mode |
+| `run.bat` / `run.sh` / `run.ps1` | Run your project — file, module, runner, or script mode |
 | `pip.bat` / `pip.sh` / `pip.ps1` | Project-local pip (or uv pip) wrapper |
 | `shell.bat` / `shell.sh` / `shell.ps1` | Open an activated shell session |
 | `sync.bat` / `sync.sh` / `sync.ps1` | Install / sync dependencies |
@@ -203,7 +203,24 @@ because time has passed since the last `generate`.
 |---|---|---|
 | `--file` | `python main.py` | Single entry file |
 | `--module` | `python -m mypackage` | Proper package with `__main__.py` |
-| `--runner` | `python -m uvicorn app.main:app ...` | Tools like uvicorn, streamlit, flask |
+| `--runner` | `python -m uvicorn app.main:app ...` | Tools runnable via `python -m` |
+| `--script` | `.venv\Scripts\adp-server.exe ...` | Console scripts from `[project.scripts]` — no `__main__` guard needed |
+
+`--runner-args` applies to both `--runner` and `--script` and supports
+shell-style quoting, so arguments may contain spaces, globs, `!`, `%`,
+`&`, and friends:
+
+```bat
+venv-bat-gen generate C:\projects\myapp --script --entry adp-server ^
+    --runner-args "serve --config \"conf dir/app.json\" --workers 4"
+```
+
+Args are parsed **once** at generation time and baked into each script as a
+literal, individually quoted argument vector — the generated scripts never
+re-split them at runtime. In `run.sh` they live in a bash array; in
+`run.ps1` a PowerShell array; in `run.bat` as quoted tokens. A `*.py`
+argument reaches your tool as the literal string `*.py`, not whatever
+Python files happen to sit next to the script.
 
 ---
 
@@ -361,7 +378,43 @@ Issues and PRs welcome. The codebase is intentionally simple:
 
 ## Changelog
 
-### Unreleased
+### v3.5.0
+- **Runner args rebuilt as a literal argument vector** — `--runner-args` is
+  now parsed once with shell-style quoting (shlex) and emitted into every
+  template as an individually quoted literal vector: quoted tokens in
+  `run.bat`, a bash array (`set -u`-safe on bash 3.2) in `run.sh`, a
+  splatted array literal in `run.ps1`. Fixes three v3.4 correctness bugs:
+  `run.sh` word-split **and glob-expanded** args against the project
+  directory (`--include *.py` silently became the folder's actual .py
+  files); `run.bat` generation silently deleted double quotes, making
+  spaced arguments impossible; `run.ps1` re-split the string on whitespace
+  at runtime. The old blanket ban on `& | < > ^ "` is replaced by
+  fail-closed validation of genuinely unrepresentable input only
+  (unbalanced quotes, embedded literal `"`, quoted newlines).
+- **New `script` entry mode** — `--script` (CLI) / "Console script" (GUI)
+  runs the venv's own console-script binary
+  (`.venv\Scripts\<name>.exe`, `.venv/bin/<name>` on POSIX) with a
+  fail-closed existence check and a "fix with `pip.bat install -e .`"
+  error path, wired through run/doctor in all three shells.
+- **Scanner: `[project.scripts]` now suggests script mode** — previously it
+  suggested `python -m <module>` on the entry's right-hand module path,
+  which silently does nothing when that module lacks an
+  `if __name__ == "__main__"` guard. Script names are now matched
+  case-preserved (the whole pyproject was previously lowercased before
+  matching).
+- **`run.bat` no longer enables delayed expansion** — it never needed it,
+  and it corrupted any `!` in passthrough `%*` arguments or runner args.
+  (The self-unpacking `setup.bat` keeps its delayed expansion, which it
+  genuinely requires.)
+- **New regression suite** — `tests/test_runner_launch_v35.py` (20 tests),
+  including live execution of generated `run.sh` against a fake venv
+  proving glob/space/`!`/`%` survival, empty-args `set -u` safety, script
+  dispatch, and fail-closed missing-script behaviour. Each headline fix
+  proven to be caught by its test via revert.
+- **Cleanup** — removed dead `_UV_INDICATORS` constant; removed a leftover
+  "KeystoneAI" reference in the `__init__.py` docstring.
+
+**Also shipping in v3.5.0** (completed earlier but previously unreleased):
 - **GUI smoke-tested for real** — added `tests/test_gui_smoke.py` (PyQt6 + pytest-qt, runs headlessly via Qt's `offscreen` platform, `dev-gui` extra). This caught a real bug: `PresetManager`'s internal field allowlist hadn't been updated for the new `include_powershell` flag, so saving a custom preset via the GUI silently dropped that setting. Fixed, plus a standing regression guard so it can't happen again for any future flag.
 - **New PowerShell (`.ps1`) variant** — `--powershell` (CLI) / "Generate PowerShell .ps1 scripts" (GUI) generates `.ps1` equivalents of every script, targeting the PowerShell 5.1 that ships with Windows (no `pwsh`/PowerShell 7 required). Useful where `.bat` execution is blocked by policy but PowerShell is allowed. Independent of `--posix`; both can be enabled together. Also embeds correctly in `--self-unpack` mode alongside `.bat`/`.sh`. Along the way, fixed a pre-existing bug in `make_test_sh`: under `set -euo pipefail`, an unguarded pytest invocation meant bash would abort the script on test failure before the pass/fail banner or correct exit code ever ran.
 - **New `check` subcommand** — `venv-bat-gen check <folder>` recomputes what `generate` would currently produce (same CLI flag > preset > folder auto-detect > default priority) and compares it against what's on disk, without writing anything. Exits 1 if anything is missing or drifted (handy in CI after a template upgrade), 0 if up to date. `--diff` shows a unified diff per drifted file. The one-time `Generated on: <timestamp>` line is ignored for comparison so `check` doesn't false-positive purely from time passing.
