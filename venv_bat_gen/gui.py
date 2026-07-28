@@ -43,7 +43,8 @@ from .core import (
     FolderScan,
     GeneratorConfig,
     MODULE_RE,
-    RUNNER_ARGS_UNSAFE_RE,
+    SCRIPT_RE,
+    runner_args_problem,
     PresetManager,
     build_previews,
     create_venv,
@@ -625,13 +626,16 @@ class App(QWidget):
         self._entry_mode_file   = QRadioButton("Python file")
         self._entry_mode_module = QRadioButton("Python module / package")
         self._entry_mode_runner = QRadioButton("Tool / runner command")
+        self._entry_mode_script = QRadioButton("Console script (venv Scripts\\)")
         self._entry_mode_file.setChecked(True)
         self._entry_mode_file.toggled.connect(self._on_entry_mode_changed)
         self._entry_mode_module.toggled.connect(self._on_entry_mode_changed)
         self._entry_mode_runner.toggled.connect(self._on_entry_mode_changed)
+        self._entry_mode_script.toggled.connect(self._on_entry_mode_changed)
         mode_grid.addWidget(self._entry_mode_file,   0, 0)
         mode_grid.addWidget(self._entry_mode_module, 0, 1)
         mode_grid.addWidget(self._entry_mode_runner, 1, 0)
+        mode_grid.addWidget(self._entry_mode_script, 1, 1)
         mode_grid.setColumnStretch(2, 1)
         layout.addLayout(mode_grid)
 
@@ -652,7 +656,7 @@ class App(QWidget):
         runner_row.addWidget(self._runner_args, 1)
         layout.addLayout(runner_row)
 
-        hint = QLabel('File: "main.py"   ·   Module: "desktop_companion"   ·   Runner: "uvicorn" + args')
+        hint = QLabel('File: "main.py"   ·   Module: "pkg"   ·   Runner: "uvicorn" + args   ·   Script: "adp-server" + args')
         hint.setObjectName("hint")
         layout.addWidget(hint)
 
@@ -810,13 +814,15 @@ class App(QWidget):
 
         if self._entry_mode_runner.isChecked():
             entry_mode = "runner"
+        elif self._entry_mode_script.isChecked():
+            entry_mode = "script"
         elif self._entry_mode_module.isChecked():
             entry_mode = "module"
         else:
             entry_mode = "file"
 
         app_entry   = self._app_entry.text().strip()
-        runner_args = self._runner_args.text().strip() if entry_mode == "runner" else ""
+        runner_args = self._runner_args.text().strip() if entry_mode in {"runner", "script"} else ""
 
         if not app_entry:
             raise ValueError("Entry value is required.")
@@ -831,13 +837,21 @@ class App(QWidget):
                     "and dots (no spaces, hyphens, or special characters)."
                 )
 
-        if entry_mode == "runner" and RUNNER_ARGS_UNSAFE_RE.search(runner_args):
+        if entry_mode == "script" and not SCRIPT_RE.match(app_entry):
             raise ValueError(
-                "Runner args contain characters that are unsafe in Windows batch files.\n\n"
-                "Blocked characters: & | < > ^ and double quotes.\n\n"
-                "Use simple argument tokens such as:\n"
-                "jobfit.main:app --host 0.0.0.0 --port 8080 --reload"
+                "Script mode expects a console-script name as created in the\n"
+                "venv Scripts folder, e.g. adp-server, uvicorn, or my.tool-cli.\n\n"
+                "Names may only contain letters, digits, dots, hyphens, and\n"
+                "underscores (no spaces, no path separators, no .exe suffix)."
             )
+
+        if entry_mode in {"runner", "script"}:
+            problem = runner_args_problem(runner_args)
+            if problem is not None:
+                raise ValueError(
+                    problem + "\n\n"
+                    'Quoting is supported, e.g.:  serve --config "conf dir/app.json"'
+                )
 
         return GeneratorConfig(
             project_dir=project_dir,
@@ -892,6 +906,7 @@ class App(QWidget):
             "venv_dir":                self._venv_dir.text().strip() or ".venv",
             "entry_mode":              (
                 "runner" if self._entry_mode_runner.isChecked() else
+                "script" if self._entry_mode_script.isChecked() else
                 "module" if self._entry_mode_module.isChecked() else "file"
             ),
             "app_entry":               self._app_entry.text().strip(),
@@ -936,6 +951,8 @@ class App(QWidget):
         mode = data.get("entry_mode", "file")
         if mode == "runner":
             self._entry_mode_runner.setChecked(True)
+        elif mode == "script":
+            self._entry_mode_script.setChecked(True)
         elif mode == "module":
             self._entry_mode_module.setChecked(True)
         else:
@@ -1019,6 +1036,8 @@ class App(QWidget):
         scan = self._last_scan
         if scan.suggested_entry_mode == "runner":
             self._entry_mode_runner.setChecked(True)
+        elif scan.suggested_entry_mode == "script":
+            self._entry_mode_script.setChecked(True)
         elif scan.suggested_entry_mode == "module":
             self._entry_mode_module.setChecked(True)
         else:
@@ -1065,9 +1084,18 @@ class App(QWidget):
         FILE_DEFAULTS   = {"main.py", "app.py", "__main__.py", ""}
         MODULE_DEFAULTS = {"desktop_companion", "app", "main", ""}
         RUNNER_DEFAULTS = {"uvicorn", "streamlit", "flask", "pytest", "PyInstaller", ""}
+        SCRIPT_DEFAULTS = {"adp-server", ""}
 
-        if self._entry_mode_runner.isChecked():
-            if current in FILE_DEFAULTS or current in MODULE_DEFAULTS or current.endswith(".py"):
+        if self._entry_mode_script.isChecked():
+            if (current in FILE_DEFAULTS or current in MODULE_DEFAULTS
+                    or current in RUNNER_DEFAULTS or current.endswith(".py")):
+                self._app_entry.setText("adp-server")
+            self._app_entry.setPlaceholderText("e.g. adp-server (venv Scripts\\<name>.exe)")
+            self._runner_args.setEnabled(True)
+            self._btn_browse_py.setEnabled(False)
+        elif self._entry_mode_runner.isChecked():
+            if (current in FILE_DEFAULTS or current in MODULE_DEFAULTS
+                    or current in SCRIPT_DEFAULTS or current.endswith(".py")):
                 self._app_entry.setText("uvicorn")
             self._app_entry.setPlaceholderText("e.g. uvicorn")
             self._runner_args.setEnabled(True)
@@ -1075,13 +1103,14 @@ class App(QWidget):
             if not self._runner_args.text().strip():
                 self._runner_args.setText("jobfit.main:app --host 0.0.0.0 --port 8080 --reload")
         elif self._entry_mode_module.isChecked():
-            if current in FILE_DEFAULTS or current in RUNNER_DEFAULTS or current.endswith(".py"):
+            if (current in FILE_DEFAULTS or current in RUNNER_DEFAULTS
+                    or current in SCRIPT_DEFAULTS or current.endswith(".py")):
                 self._app_entry.setText("desktop_companion")
             self._app_entry.setPlaceholderText("e.g. desktop_companion")
             self._runner_args.setEnabled(False)
             self._btn_browse_py.setEnabled(False)
         else:
-            if current in MODULE_DEFAULTS or current in RUNNER_DEFAULTS:
+            if current in MODULE_DEFAULTS or current in RUNNER_DEFAULTS or current in SCRIPT_DEFAULTS:
                 self._app_entry.setText("main.py")
             self._app_entry.setPlaceholderText("e.g. main.py")
             self._runner_args.setEnabled(False)
@@ -1115,7 +1144,7 @@ class App(QWidget):
                     )
                     editor.setPlainText(placeholder)
             detail = f"{cfg.entry_mode}: {cfg.app_entry}"
-            if cfg.entry_mode == "runner" and cfg.runner_args:
+            if cfg.entry_mode in {"runner", "script"} and cfg.runner_args:
                 detail += f" {cfg.runner_args}"
             tags = []
             if cfg.use_uv:          tags.append("uv")
@@ -1138,7 +1167,7 @@ class App(QWidget):
         self._log_line(f"Generating for: {cfg.project_dir}{uv_tag}", "")
         self._left_tabs.setCurrentIndex(1)
         detail = f"Mode: {cfg.entry_mode}  ·  Entry: {cfg.app_entry}"
-        if cfg.entry_mode == "runner" and cfg.runner_args:
+        if cfg.entry_mode in {"runner", "script"} and cfg.runner_args:
             detail += f"  ·  Args: {cfg.runner_args}"
         self._log_line(detail, "")
 
@@ -1190,7 +1219,7 @@ class App(QWidget):
         self._status(
             f"Generated {file_count} files -> {cfg.project_dir}   "
             f"({cfg.entry_mode}: {cfg.app_entry}"
-            f"{(' ' + cfg.runner_args) if cfg.entry_mode == 'runner' and cfg.runner_args else ''})"
+            f"{(' ' + cfg.runner_args) if cfg.entry_mode in ('runner', 'script') and cfg.runner_args else ''})"
         )
         QMessageBox.information(self, "Generated",
             f"{file_count} project helper files written to:\n{cfg.project_dir}")

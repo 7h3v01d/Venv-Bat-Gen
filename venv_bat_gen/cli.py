@@ -16,7 +16,8 @@ from .core import (
     GeneratorConfig,
     PresetManager,
     MODULE_RE,
-    RUNNER_ARGS_UNSAFE_RE,
+    SCRIPT_RE,
+    runner_args_problem,
     _VERSION,
     build_previews,
     check_drift,
@@ -74,11 +75,15 @@ def _add_shared_config_args(p: argparse.ArgumentParser) -> None:
                       help="Entry mode: python -m <entry>")
     mode.add_argument("--runner", dest="entry_mode", action="store_const", const="runner",
                       help="Entry mode: python -m <entry> [runner-args]")
+    mode.add_argument("--script", dest="entry_mode", action="store_const", const="script",
+                      help="Entry mode: venv console script <entry>[.exe] [runner-args]")
 
     p.add_argument("--entry",       metavar="VALUE",
                    help="Entry file, module, or runner.")
     p.add_argument("--runner-args", metavar="ARGS", default="",
-                   help="Args appended after runner module (runner mode only).")
+                   help="Args appended after the runner module or console script "
+                        "(runner/script modes). Shell-style quoting supported: "
+                        "--runner-args 'serve --name \"My App\"'")
     p.add_argument("--name",        metavar="NAME",
                    help="Project name in .bat headers (default: folder name).")
     p.add_argument("--venv-dir",    metavar="DIR", default=".venv",
@@ -189,9 +194,14 @@ def _resolve_generator_config(
         if not MODULE_RE.match(cfg.app_entry):
             print(C.err(f"[ERROR] Invalid module name: '{cfg.app_entry}'"), file=sys.stderr)
             return None, {}, 1
-    if cfg.entry_mode == "runner" and RUNNER_ARGS_UNSAFE_RE.search(cfg.runner_args):
-        print(C.err("[ERROR] Runner args contain unsafe characters: & | < > ^ \""), file=sys.stderr)
+    if cfg.entry_mode == "script" and not SCRIPT_RE.match(cfg.app_entry):
+        print(C.err(f"[ERROR] Invalid console-script name: '{cfg.app_entry}'"), file=sys.stderr)
         return None, {}, 1
+    if cfg.entry_mode in {"runner", "script"}:
+        problem = runner_args_problem(cfg.runner_args)
+        if problem is not None:
+            print(C.err(f"[ERROR] {problem}"), file=sys.stderr)
+            return None, {}, 1
 
     return cfg, preset_data, 0
 
@@ -270,7 +280,7 @@ def _cmd_generate(args: argparse.Namespace) -> int:
     posix_str = "  [+posix]" if cfg.include_posix else ""
     print(f"  Mode  : {mode_str}{uv_str}{posix_str}")
     print(f"  Entry : {cfg.app_entry}")
-    if cfg.entry_mode == "runner" and cfg.runner_args:
+    if cfg.entry_mode in {"runner", "script"} and cfg.runner_args:
         print(f"  Args  : {cfg.runner_args}")
     print()
 
