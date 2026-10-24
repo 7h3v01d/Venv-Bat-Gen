@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2025-2026 Leon Priest (7h3v01d)
 """
 GUI smoke tests for venv_bat_gen.gui — specifically verifying the
 `--powershell` / .ps1 wiring added alongside the CLI feature, since that
@@ -21,8 +23,8 @@ import pytest
 
 pytest.importorskip("PyQt6")
 
-from venv_bat_gen.gui import App, PowerShellHighlighter  # noqa: E402
 from venv_bat_gen.core import PresetManager  # noqa: E402
+from venv_bat_gen.gui import App, PowerShellHighlighter  # noqa: E402
 
 
 @pytest.fixture
@@ -131,7 +133,7 @@ class TestPreviewRefresh:
         window._refresh_preview()
         content = window._preview_editors["run.ps1"].toPlainText()
         assert content.startswith("#Requires -Version 5.1")
-        assert "Set-Location -Path $PSScriptRoot" in content
+        assert "Set-Location -LiteralPath $PSScriptRoot" in content
 
     def test_unchecking_hides_tab_again(self, window):
         window._chk_powershell.setChecked(True)

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2025-2026 Leon Priest (7h3v01d)
 """
 Regression tests for the v3.5.0 runner-launch overhaul.
 

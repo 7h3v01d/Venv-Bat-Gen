@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2025-2026 Leon Priest (7h3v01d)
 """
 venv_bat_gen.gui
 ================
@@ -12,8 +14,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QSyntaxHighlighter, QTextCharFormat
+from PyQt6.QtCore import QObject, Qt, QThread, QUrl, pyqtSignal, pyqtSlot
+from PyQt6.QtGui import QColor, QDesktopServices, QFont, QSyntaxHighlighter, QTextCharFormat
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -40,17 +42,29 @@ from PyQt6.QtWidgets import (
 )
 
 from .core import (
-    FolderScan,
-    GeneratorConfig,
+    _VERSION,
+    MANIFEST_NAME,
     MODULE_RE,
     SCRIPT_RE,
-    runner_args_problem,
+    FolderScan,
+    GeneratorConfig,
+    ManifestError,
     PresetManager,
+    apply_update,
     build_previews,
+    check_drift,
+    config_problem,
     create_venv,
     generate_files,
+    gitignore_entries,
+    plan_update,
+    read_manifest,
+    runner_args_problem,
     scan_project_folder,
+    update_gitignore,
 )
+
+_DEFAULT_RUNNER_ARGS = "app.main:app --host 0.0.0.0 --port 8000 --reload"
 
 
 # ---------------------------------------------------------------------------
@@ -401,20 +415,27 @@ class PowerShellHighlighter(QSyntaxHighlighter):
 # Worker thread
 # ---------------------------------------------------------------------------
 
-class VenvWorker(QThread):
-    finished = pyqtSignal()
-    error    = pyqtSignal(str)
+class VenvWorker(QObject):
+    """Creates the venv off the GUI thread (QObject moved onto a QThread).
+
+    v3.5.0 subclassed QThread and redeclared a `finished` signal, shadowing
+    QThread.finished; this is the conventional worker-object pattern."""
+
+    done   = pyqtSignal()
+    failed = pyqtSignal(str)
 
     def __init__(self, cfg: GeneratorConfig) -> None:
         super().__init__()
         self.cfg = cfg
 
+    @pyqtSlot()
     def run(self) -> None:
         try:
             create_venv(self.cfg)
-            self.finished.emit()
-        except Exception as exc:
-            self.error.emit(str(exc))
+        except Exception as exc:  # noqa: BLE001 - surfaced to the user in the log
+            self.failed.emit(str(exc))
+        else:
+            self.done.emit()
 
 
 # ---------------------------------------------------------------------------
@@ -424,10 +445,13 @@ class VenvWorker(QThread):
 class App(QWidget):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Venv Batch Template Generator")
+        self.setWindowTitle(f"Venv Batch Template Generator  v{_VERSION}")
         self.setMinimumSize(1100, 740)
         self.resize(1200, 800)
-        self._worker: VenvWorker | None = None
+        # (thread, worker) pairs kept alive until the thread finishes, so
+        # neither is garbage-collected mid-run.
+        self._worker_refs: list[tuple[QThread, VenvWorker]] = []
+        self._pending_cfg: GeneratorConfig | None = None
         self._last_written: list[Path] = []
         self._presets = PresetManager()
         self._build_ui()
@@ -446,7 +470,8 @@ class App(QWidget):
         header.setSpacing(2)
         title = QLabel("Venv Batch Template Generator")
         title.setObjectName("sectiontitle")
-        sub = QLabel("Generate project-local venv scripts for file, module, and runner-command Python projects.")
+        sub = QLabel("Project-local venv scripts (.bat, .sh, .ps1) for file, module, runner, "
+                     "and console-script Python projects — generate, check, and safely update.")
         sub.setObjectName("subtitle")
         header.addWidget(title)
         header.addWidget(sub)
@@ -487,10 +512,16 @@ class App(QWidget):
 
         action_w = QWidget()
         action_w.setMinimumWidth(540)
-        action_layout = QHBoxLayout(action_w)
+        action_layout = QVBoxLayout(action_w)
         action_layout.setContentsMargins(0, 0, 0, 0)
-        action_layout.setSpacing(8)
-        self._populate_action_row(action_layout)
+        action_layout.setSpacing(6)
+        row1, row2 = QHBoxLayout(), QHBoxLayout()
+        row1.setSpacing(8)
+        row2.setSpacing(8)
+        self._populate_action_row(row1)
+        self._populate_maintenance_row(row2)
+        action_layout.addLayout(row1)
+        action_layout.addLayout(row2)
         outer.addWidget(action_w)
 
         return w
@@ -603,6 +634,11 @@ class App(QWidget):
         outer.addWidget(self._detect_hints)
 
         btn_row = QHBoxLayout()
+        self._btn_load_manifest = QPushButton(f"Load saved settings ({MANIFEST_NAME})")
+        self._btn_load_manifest.setObjectName("primary")
+        self._btn_load_manifest.clicked.connect(self._on_load_manifest)
+        self._btn_load_manifest.setVisible(False)
+        btn_row.addWidget(self._btn_load_manifest)
         self._btn_apply_scan = QPushButton("Apply suggestions")
         self._btn_apply_scan.clicked.connect(self._on_apply_scan)
         btn_row.addWidget(self._btn_apply_scan)
@@ -650,13 +686,13 @@ class App(QWidget):
 
         runner_row = QHBoxLayout()
         runner_row.addWidget(QLabel("Runner args:"))
-        self._runner_args = QLineEdit("jobfit.main:app --host 0.0.0.0 --port 8080 --reload")
-        self._runner_args.setPlaceholderText("e.g. jobfit.main:app --host 0.0.0.0 --port 8080 --reload")
+        self._runner_args = QLineEdit(_DEFAULT_RUNNER_ARGS)
+        self._runner_args.setPlaceholderText(f"e.g. {_DEFAULT_RUNNER_ARGS}")
         self._runner_args.setEnabled(False)
         runner_row.addWidget(self._runner_args, 1)
         layout.addLayout(runner_row)
 
-        hint = QLabel('File: "main.py"   ·   Module: "pkg"   ·   Runner: "uvicorn" + args   ·   Script: "adp-server" + args')
+        hint = QLabel('File: "main.py"   ·   Module: "pkg"   ·   Runner: "uvicorn" + args   ·   Script: "my-tool" + args')
         hint.setObjectName("hint")
         layout.addWidget(hint)
 
@@ -684,6 +720,12 @@ class App(QWidget):
         self._chk_powershell   = QCheckBox("Generate PowerShell .ps1 scripts")
         self._chk_setup        = QCheckBox("Include setup script")
         self._chk_self_unpack  = QCheckBox("Repo mode: single self-unpacking setup.bat")
+        self._chk_manifest     = QCheckBox(f"Save settings to {MANIFEST_NAME}  (enables Check / Update)")
+        self._chk_manifest.setChecked(True)
+        self._chk_gitignore    = QCheckBox("Manage a .gitignore block")
+        self._chk_gitignore.setToolTip(
+            "Adds/refreshes a marked block ignoring the venv, update backups and — in repo "
+            "mode — the companion scripts setup.bat writes. Lines outside it are untouched.")
 
         grid.addWidget(self._chk_overwrite,    0, 0)
         grid.addWidget(self._chk_requirements, 0, 1)
@@ -696,6 +738,8 @@ class App(QWidget):
         grid.addWidget(self._chk_powershell,   4, 0)
         grid.addWidget(self._chk_setup,        4, 1)
         grid.addWidget(self._chk_self_unpack,  5, 0)
+        grid.addWidget(self._chk_gitignore,    5, 1)
+        grid.addWidget(self._chk_manifest,     6, 0, 1, 2)
 
         # uv checkbox updates the "Create .venv" label to clarify which tool
         self._chk_uv.toggled.connect(self._on_uv_toggled)
@@ -727,6 +771,26 @@ class App(QWidget):
         self._btn_open_folder.setEnabled(False)
         self._btn_open_folder.clicked.connect(self._open_output_folder)
         row.addWidget(self._btn_open_folder)
+
+        row.addStretch()
+
+    def _populate_maintenance_row(self, row: QHBoxLayout) -> None:
+        _fixed = QSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+        btn_check = QPushButton("✓  Check Drift")
+        btn_check.setMinimumWidth(130)
+        btn_check.setSizePolicy(_fixed)
+        btn_check.setToolTip("Compare the scripts on disk with what these settings would generate.")
+        btn_check.clicked.connect(self._on_check)
+        row.addWidget(btn_check)
+
+        btn_update = QPushButton("↻  Safe Update…")
+        btn_update.setMinimumWidth(160)
+        btn_update.setSizePolicy(_fixed)
+        btn_update.setToolTip("Regenerate scripts that are untouched since they were generated; "
+                              "hand-edited files are never overwritten. Backups go to .vbg-backup/.")
+        btn_update.clicked.connect(self._on_update)
+        row.addWidget(btn_update)
 
         btn_clear = QPushButton("Clear Log")
         btn_clear.setObjectName("danger")
@@ -853,7 +917,7 @@ class App(QWidget):
                     'Quoting is supported, e.g.:  serve --config "conf dir/app.json"'
                 )
 
-        return GeneratorConfig(
+        cfg = GeneratorConfig(
             project_dir=project_dir,
             project_name=project_name,
             venv_dir=venv_dir,
@@ -871,7 +935,13 @@ class App(QWidget):
             include_powershell=self._chk_powershell.isChecked(),
             include_setup=self._chk_setup.isChecked(),
             self_unpack=self._chk_self_unpack.isChecked(),
+            write_manifest=self._chk_manifest.isChecked(),
         )
+        # Shared fail-closed validation (venv folder, project name, ...)
+        problem = config_problem(cfg)
+        if problem:
+            raise ValueError(problem)
+        return cfg
 
     # ------------------------------------------------------------------
     # Preset slots
@@ -922,6 +992,7 @@ class App(QWidget):
             "include_powershell":      self._chk_powershell.isChecked(),
             "include_setup":           self._chk_setup.isChecked(),
             "self_unpack":             self._chk_self_unpack.isChecked(),
+            "write_manifest":          self._chk_manifest.isChecked(),
         }
         self._presets.save(name, data)
         self._reload_preset_combo(select=name)
@@ -970,6 +1041,7 @@ class App(QWidget):
         if "include_powershell"     in data: self._chk_powershell.setChecked(data["include_powershell"])
         if "include_setup"          in data: self._chk_setup.setChecked(data["include_setup"])
         if "self_unpack"            in data: self._chk_self_unpack.setChecked(data["self_unpack"])
+        if "write_manifest"         in data: self._chk_manifest.setChecked(data["write_manifest"])
 
     def _reload_preset_combo(self, select: str | None = None) -> None:
         self._preset_combo.blockSignals(True)
@@ -1017,14 +1089,16 @@ class App(QWidget):
         scan = scan_project_folder(folder, venv_dir)
         self._last_scan = scan
 
-        has_suggestions = scan.suggested_entry_mode is not None
-        has_findings    = (scan.has_requirements or scan.has_pyproject
+        has_suggestions = (scan.suggested_entry_mode is not None
+                           or scan.suggested_venv_dir is not None)
+        has_findings    = (scan.has_requirements or scan.has_pyproject or scan.manifest_found
                            or scan.has_setup_py or scan.venv_found or scan.has_uv_lock)
         if not (has_suggestions or has_findings):
             self._detect_widget.setVisible(False)
             return
 
         self._detect_hints.setText("\n".join(scan.hints))
+        self._btn_load_manifest.setVisible(scan.manifest_found)
         self._btn_apply_scan.setVisible(
             has_suggestions or scan.suggested_use_uv or scan.suggested_use_posix
         )
@@ -1044,6 +1118,8 @@ class App(QWidget):
             self._entry_mode_file.setChecked(True)
         if scan.suggested_app_entry:
             self._app_entry.setText(scan.suggested_app_entry)
+        if scan.suggested_venv_dir:
+            self._venv_dir.setText(scan.suggested_venv_dir)
         if scan.suggested_runner_args is not None:
             self._runner_args.setText(scan.suggested_runner_args)
         if scan.has_requirements:
@@ -1084,13 +1160,13 @@ class App(QWidget):
         FILE_DEFAULTS   = {"main.py", "app.py", "__main__.py", ""}
         MODULE_DEFAULTS = {"desktop_companion", "app", "main", ""}
         RUNNER_DEFAULTS = {"uvicorn", "streamlit", "flask", "pytest", "PyInstaller", ""}
-        SCRIPT_DEFAULTS = {"adp-server", ""}
+        SCRIPT_DEFAULTS = {"adp-server", "my-tool", ""}
 
         if self._entry_mode_script.isChecked():
             if (current in FILE_DEFAULTS or current in MODULE_DEFAULTS
                     or current in RUNNER_DEFAULTS or current.endswith(".py")):
-                self._app_entry.setText("adp-server")
-            self._app_entry.setPlaceholderText("e.g. adp-server (venv Scripts\\<name>.exe)")
+                self._app_entry.setText("my-tool")
+            self._app_entry.setPlaceholderText("e.g. my-tool (venv Scripts\\<name>.exe)")
             self._runner_args.setEnabled(True)
             self._btn_browse_py.setEnabled(False)
         elif self._entry_mode_runner.isChecked():
@@ -1101,12 +1177,12 @@ class App(QWidget):
             self._runner_args.setEnabled(True)
             self._btn_browse_py.setEnabled(False)
             if not self._runner_args.text().strip():
-                self._runner_args.setText("jobfit.main:app --host 0.0.0.0 --port 8080 --reload")
+                self._runner_args.setText(_DEFAULT_RUNNER_ARGS)
         elif self._entry_mode_module.isChecked():
             if (current in FILE_DEFAULTS or current in RUNNER_DEFAULTS
                     or current in SCRIPT_DEFAULTS or current.endswith(".py")):
-                self._app_entry.setText("desktop_companion")
-            self._app_entry.setPlaceholderText("e.g. desktop_companion")
+                self._app_entry.setText("app")
+            self._app_entry.setPlaceholderText("e.g. mypackage")
             self._runner_args.setEnabled(False)
             self._btn_browse_py.setEnabled(False)
         else:
@@ -1149,6 +1225,7 @@ class App(QWidget):
             tags = []
             if cfg.use_uv:          tags.append("uv")
             if cfg.include_posix:   tags.append("posix")
+            if cfg.include_powershell: tags.append("powershell")
             if cfg.include_setup:   tags.append("setup")
             if cfg.self_unpack:     tags.append("self-unpack")
             tag_str = "  [" + ", ".join(tags) + "]" if tags else ""
@@ -1185,6 +1262,13 @@ class App(QWidget):
         for path in written:
             self._log_line(path.name, "ok")
 
+        if self._chk_gitignore.isChecked():
+            try:
+                if update_gitignore(cfg.project_dir, gitignore_entries(cfg)):
+                    self._log_line(".gitignore (managed block updated)", "ok")
+            except OSError as exc:
+                self._log_line(f".gitignore not updated: {exc}", "warn")
+
         self._refresh_preview()
         self._last_written = written
         self._btn_open_folder.setEnabled(True)
@@ -1198,17 +1282,38 @@ class App(QWidget):
                 tool = "uv venv" if cfg.use_uv else "python -m venv"
                 self._log_line(f"Creating .venv via {tool}…", "")
                 self._status("Creating .venv…")
-                self._worker = VenvWorker(cfg)
-                self._worker.finished.connect(lambda: self._on_venv_created(cfg))
-                self._worker.error.connect(self._on_venv_error)
-                self._worker.start()
+                self._start_venv_worker(cfg)
         else:
             self._finish_generate(cfg)
 
-    def _on_venv_created(self, cfg: GeneratorConfig) -> None:
+    def _start_venv_worker(self, cfg: GeneratorConfig) -> None:
+        thread = QThread(self)
+        worker = VenvWorker(cfg)
+        worker.moveToThread(thread)
+        self._pending_cfg = cfg
+        thread.started.connect(worker.run)
+        # Bound slots on self (a main-thread QObject) => queued, GUI-safe.
+        worker.done.connect(self._on_venv_created)
+        worker.failed.connect(self._on_venv_error)
+        worker.done.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(self._release_workers)
+        self._worker_refs.append((thread, worker))
+        thread.start()
+
+    @pyqtSlot()
+    def _release_workers(self) -> None:
+        self._worker_refs = [(t, w) for t, w in self._worker_refs if t.isRunning()]
+
+    @pyqtSlot()
+    def _on_venv_created(self) -> None:
+        cfg = self._pending_cfg
+        if cfg is None:
+            return
         self._log_line(f".venv created at {cfg.project_dir / cfg.venv_dir}", "ok")
         self._finish_generate(cfg)
 
+    @pyqtSlot(str)
     def _on_venv_error(self, msg: str) -> None:
         self._log_line(f"venv creation failed: {msg}", "error")
         self._status("Generation complete (venv creation failed — see log).")
@@ -1225,13 +1330,110 @@ class App(QWidget):
             f"{file_count} project helper files written to:\n{cfg.project_dir}")
 
     def _open_output_folder(self) -> None:
+        # v3.5.0 used os.startfile, which only exists on Windows.
         if self._last_written:
-            os.startfile(str(self._last_written[0].parent))
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._last_written[0].parent)))
+
+    # ------------------------------------------------------------------
+    # Saved settings, drift check, safe update
+    # ------------------------------------------------------------------
+
+    def _on_load_manifest(self) -> None:
+        raw = self._project_dir.text().strip()
+        if not raw:
+            return
+        try:
+            manifest = read_manifest(Path(raw))
+        except ManifestError as exc:
+            QMessageBox.warning(self, "Saved settings unreadable", str(exc))
+            return
+        if manifest is None:
+            self._status(f"No {MANIFEST_NAME} in that folder.")
+            return
+        settings = dict(manifest.settings)
+        if "project_name" in settings:
+            self._project_name.setText(settings["project_name"])
+        self._apply_preset(settings)
+        self._detect_widget.setVisible(False)
+        self._status(f"Loaded saved settings from {MANIFEST_NAME} (v{manifest.version}).")
+        self._log_line(f"Loaded saved settings from {MANIFEST_NAME}", "ok")
+        self._refresh_preview()
+
+    def _on_check(self) -> None:
+        try:
+            cfg = self._read_config()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Configuration error", str(exc))
+            return
+        entries = check_drift(cfg)
+        self._left_tabs.setCurrentIndex(1)
+        self._log_line(f"Drift check: {cfg.project_dir}", "")
+        tags = {"match": "ok", "missing": "warn", "drifted": "warn"}
+        for e in entries:
+            self._log_line(f"{e.filename} — {e.status}", tags[e.status])
+        issues = sum(e.status != "match" for e in entries)
+        self._status("Up to date — no drift." if not issues else
+                     f"{issues} file(s) missing or drifted — use Safe Update to refresh them.")
+
+    def _on_update(self) -> None:
+        try:
+            cfg = self._read_config()
+            manifest = read_manifest(cfg.project_dir)
+        except (ValueError, ManifestError) as exc:
+            QMessageBox.warning(self, "Cannot update", str(exc))
+            return
+        actions = plan_update(cfg, manifest)
+        needs_adopt = [a for a in actions if a.action == "skip" and "--adopt" in a.reason]
+        if manifest is None and needs_adopt:
+            answer = QMessageBox.question(
+                self, "Adopt existing scripts?",
+                f"{len(needs_adopt)} script(s) were generated by an older venv-bat-gen and "
+                f"there is no {MANIFEST_NAME} yet.\n\nReplace them with the current templates? "
+                "Each one is backed up to .vbg-backup/ first.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if answer == QMessageBox.StandardButton.Yes:
+                actions = plan_update(cfg, manifest, adopt=True)
+        changes = [a for a in actions if a.action in {"create", "update", "remove"}]
+        skipped = [a for a in actions if a.action == "skip"]
+        if not changes:
+            self._log_line("Safe update: nothing to change.", "ok")
+            for a in skipped:
+                self._log_line(f"{a.filename} — skipped: {a.reason}", "warn")
+            self._status("Nothing to update." + (f" {len(skipped)} file(s) skipped." if skipped else ""))
+            return
+        summary = "\n".join(f"  {a.action:<7} {a.filename}" for a in changes)
+        if skipped:
+            summary += "\n\nLeft alone (edited or not ours):\n" + "\n".join(
+                f"  {a.filename}" for a in skipped)
+        if QMessageBox.question(self, "Safe update", f"Apply these changes?\n\n{summary}",
+                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                                ) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            backup = apply_update(cfg, actions, manifest)
+            if self._chk_gitignore.isChecked():
+                update_gitignore(cfg.project_dir, gitignore_entries(cfg))
+        except OSError as exc:
+            QMessageBox.critical(self, "Update failed", str(exc))
+            return
+        self._left_tabs.setCurrentIndex(1)
+        for a in actions:
+            if a.action != "unchanged":
+                tag = "ok" if a.action in {"create", "update"} else "warn"
+                self._log_line(f"{a.filename} — {a.action}: {a.reason}", tag)
+        if backup is not None:
+            self._log_line(f"Backups: {backup}", "")
+        self._last_written = [cfg.project_dir / a.filename for a in changes] or self._last_written
+        self._btn_open_folder.setEnabled(bool(self._last_written))
+        self._status(f"Updated {len(changes)} file(s)" +
+                     (f"; {len(skipped)} skipped to protect local edits." if skipped else "."))
+        self._refresh_preview()
 
     def closeEvent(self, event) -> None:
-        if self._worker and self._worker.isRunning():
-            self._worker.quit()
-            self._worker.wait(2000)
+        for thread, _worker in list(self._worker_refs):
+            if thread.isRunning():
+                thread.quit()
+                thread.wait(2000)
         event.accept()
 
 

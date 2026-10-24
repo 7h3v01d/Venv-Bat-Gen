@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2025-2026 Leon Priest (7h3v01d)
 """
 Tests for make_self_unpacking_setup_bat(): the single-file, repo-friendly
 bootstrap script that embeds every companion script as base64 and decodes
@@ -153,7 +155,7 @@ class TestSelfUnpackingSetupBat:
         b64 = _extract_embedded_b64(setup_content, "run.ps1")
         decoded = base64.b64decode(b64).decode("utf-8")
 
-        expected = make_run_ps1(cfg).replace("\n", "\r\n")
+        expected = "\ufeff" + make_run_ps1(cfg).replace("\n", "\r\n")  # v3.6: BOM
         assert decoded == expected
 
     def test_bat_payload_uses_crlf(self, base_cfg):
@@ -183,4 +185,5 @@ class TestSelfUnpackingSetupBat:
         for filename, expected_lf in checks.items():
             b64 = _extract_embedded_b64(setup_content, filename)
             decoded = base64.b64decode(b64).decode("utf-8")
-            assert decoded == expected_lf.replace("\n", "\r\n"), filename
+            bom = "\ufeff" if filename.endswith(".ps1") else ""  # v3.6: BOM for .ps1
+            assert decoded == bom + expected_lf.replace("\n", "\r\n"), filename

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2025-2026 Leon Priest (7h3v01d)
 """
 venv_bat_gen.gui_launcher
 ==========================

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2025-2026 Leon Priest (7h3v01d)
 """
 Tests for scan_project_folder(): the folder auto-detection heuristics used
 by both the GUI ("Folder auto-detect") and the CLI (`venv-bat-gen scan`).

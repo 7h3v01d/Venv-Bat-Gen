@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2025-2026 Leon Priest (7h3v01d)
 """
 Tests for create_venv(): wraps `python -m venv` / `uv venv` via subprocess.
 Subprocess calls are mocked — these tests verify the *decision logic*

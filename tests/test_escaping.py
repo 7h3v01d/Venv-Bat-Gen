@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2025-2026 Leon Priest (7h3v01d)
 """
 Tests for the low-level string-safety helpers in core.py:
 bat_escape, _sh_escape, _b64_encode, MODULE_RE, SCRIPT_RE, and the v3.5

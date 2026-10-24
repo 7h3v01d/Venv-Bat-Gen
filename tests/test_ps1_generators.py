@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2025-2026 Leon Priest (7h3v01d)
 """
 Tests for the PowerShell .ps1 template generators in core.py:
 make_run_ps1, make_pip_ps1, make_shell_ps1, make_sync_ps1,
@@ -40,7 +42,7 @@ def test_all_ps1_generators_include_attribution_line(base_cfg):
 
 def test_all_ps1_generators_cd_to_script_dir(base_cfg):
     for gen in ALL_PS1_GENERATORS:
-        assert "Set-Location -Path $PSScriptRoot" in gen(base_cfg)
+        assert "Set-Location -LiteralPath $PSScriptRoot" in gen(base_cfg)
 
 
 def test_no_curly_brace_placeholders_leak_through(base_cfg):
@@ -83,12 +85,16 @@ class TestMakeRunPs1:
 
     def test_pause_on_exit_true_adds_read_host(self, cfg_factory):
         cfg = cfg_factory(pause_on_exit=True)
-        assert 'Read-Host "Press Enter to continue" | Out-Null' in make_run_ps1(cfg)
+        content = make_run_ps1(cfg)
+        # v3.6: pauses go through Invoke-VbgPause (skipped under CI / VBG_NO_PAUSE)
+        assert "Read-Host $Prompt | Out-Null" in content
+        assert content.rstrip().endswith("Invoke-VbgPause\nexit $EXITCODE")
 
     def test_pause_on_exit_false_omits_read_host(self, cfg_factory):
         cfg = cfg_factory(pause_on_exit=False)
         content = make_run_ps1(cfg)
         assert 'Read-Host "Press Enter to continue"' not in content
+        assert "Read-Host" not in content and "Invoke-VbgPause" not in content
 
     def test_venv_dir_is_reflected(self, cfg_factory):
         cfg = cfg_factory(venv_dir="env_custom")
@@ -168,7 +174,9 @@ class TestMakeSyncPs1:
         # Matches make_sync_bat/make_sync_sh: sync always waits for a
         # keypress, independent of the run.ps1-only pause_on_exit setting.
         cfg = cfg_factory(pause_on_exit=False)
-        assert 'Read-Host "Press Enter to continue"' in make_sync_ps1(cfg)
+        content = make_sync_ps1(cfg)
+        assert "Invoke-VbgPause\nexit 0" in content
+        assert "Read-Host $Prompt" in content
 
 
 # ---------------------------------------------------------------------------

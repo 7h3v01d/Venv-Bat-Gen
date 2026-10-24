@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2025-2026 Leon Priest (7h3v01d)
 """
 Tests for check_drift() and DriftEntry — the comparison logic behind the
 `venv-bat-gen check` subcommand.
@@ -64,8 +66,9 @@ class TestCheckDrift:
         assert statuses["pip.bat"] == "match"
 
     def test_generation_timestamp_alone_does_not_count_as_drift(self, base_cfg, monkeypatch):
-        import venv_bat_gen.core as core_module
         from datetime import datetime as real_datetime
+
+        import venv_bat_gen.core as core_module
 
         generate_files(base_cfg)
 

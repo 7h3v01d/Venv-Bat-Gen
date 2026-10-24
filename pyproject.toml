@@ -4,10 +4,10 @@ build-backend = "hatchling.build"
 
 [project]
 name = "venv-bat-gen"
-version = "3.5.0"
-description = "Generate project-local venv helper scripts (.bat + .sh) for Windows, WSL, macOS, and Linux."
+version = "3.6.0"
+description = "Generate, check, and safely update project-local venv helper scripts (.bat, .sh, .ps1) for Windows, WSL, macOS, and Linux."
 readme = "README.md"
-license = { text = "MIT" }
+license = { text = "Apache-2.0" }
 requires-python = ">=3.11"
 authors = [
     { name = "Leon Priest", email = "leonpriest76@gmail.com" },
@@ -20,6 +20,7 @@ keywords = [
     "developer-tools",
     "uv",
     "python-tooling",
+    "powershell",
 ]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
@@ -27,12 +28,13 @@ classifiers = [
     "Environment :: Console",
     "Environment :: X11 Applications :: Qt",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Build Tools",
     "Topic :: Utilities",
 ]
@@ -45,12 +47,14 @@ gui = [
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.1",
+    "ruff==0.17.2",
 ]
 dev-gui = [
     "pytest>=7.0",
     "pytest-qt>=4.2",
     "pytest-cov>=4.1",
     "PyQt6>=6.4",
+    "ruff==0.17.2",
 ]
 
 [project.scripts]
@@ -70,10 +74,13 @@ packages = ["venv_bat_gen"]
 [tool.hatch.build.targets.sdist]
 include = [
     "venv_bat_gen/",
+    "tests/",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE",
     "pyproject.toml",
 ]
+exclude = ["**/__pycache__"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -84,7 +91,17 @@ line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint]
+# An explicit rule set, so a ruff release that grows its defaults can't
+# turn the CI lint gate red overnight (v3.5.0's gate failed that way).
+# E/W: pycodestyle, F: pyflakes, I: import sorting, B: bugbear,
+# UP: pyupgrade, PLW1510: subprocess.run without check=.
+select = ["E", "W", "F", "I", "B", "UP", "PLW1510"]
 # E701: this codebase deliberately uses compact `if x: y` one-liners
 # (often column-aligned) for short, repetitive flag-checking blocks —
 # a style choice used consistently in core.py, cli.py, and gui.py.
-ignore = ["E701"]
+# E501: long template/help lines are clearer unwrapped.
+ignore = ["E701", "E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["venv_bat_gen"]
+known-local-folder = ["conftest", "helpers"]

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2025-2026 Leon Priest (7h3v01d)
 """
 Tests for build_previews() (in-memory {filename: content} map) and
 generate_files() (actually writes scripts to disk).
@@ -12,7 +14,6 @@ import sys
 import pytest
 
 from venv_bat_gen.core import build_previews, generate_files
-
 
 # ---------------------------------------------------------------------------
 # build_previews

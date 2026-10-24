@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2025-2026 Leon Priest (7h3v01d)
 """
 Shared pytest fixtures for venv_bat_gen tests.
 """
@@ -77,3 +79,17 @@ def cfg_factory(tmp_path):
 def with_cfg(cfg: GeneratorConfig, **overrides) -> GeneratorConfig:
     """Convenience: derive a new frozen GeneratorConfig from an existing one."""
     return replace(cfg, **overrides)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_preset_storage(tmp_path_factory, monkeypatch):
+    """Never let a test read or write the developer's real
+    ~/.venv_bat_gen/presets.json (or the legacy ~/.keystoneai path)."""
+    from venv_bat_gen.core import PresetManager
+
+    home = tmp_path_factory.mktemp("home")
+    monkeypatch.setattr(PresetManager, "_STORAGE_DIR", home / ".venv_bat_gen")
+    monkeypatch.setattr(PresetManager, "_STORAGE_FILE", home / ".venv_bat_gen" / "presets.json")
+    monkeypatch.setattr(PresetManager, "_LEGACY_DIR", home / ".keystoneai")
+    monkeypatch.setattr(PresetManager, "_LEGACY_FILE",
+                        home / ".keystoneai" / "venv_generator_presets.json")

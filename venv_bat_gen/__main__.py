@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2025-2026 Leon Priest (7h3v01d)
 """Enable `python -m venv_bat_gen` entry point.
 
 With no arguments: launches the GUI.

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2025-2026 Leon Priest (7h3v01d)
 """
 Tests for the POSIX .sh template generators in core.py:
 make_run_sh, make_pip_sh, make_shell_sh, make_sync_sh,
@@ -206,7 +208,7 @@ class TestMakeTestSh:
         test_sh.chmod(0o755)
 
         result = subprocess.run(
-            ["bash", str(test_sh)], cwd=tmp_path, capture_output=True, text=True,
+            ["bash", str(test_sh)], cwd=tmp_path, capture_output=True, text=True, check=False,
         )
         assert result.returncode == 1
         assert "TESTS FAILED" in result.stdout

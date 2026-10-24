@@ -2,28 +2,80 @@
 
 [![CI](https://github.com/7h3v01d/Venv-Bat-Gen/actions/workflows/ci.yml/badge.svg)](https://github.com/7h3v01d/Venv-Bat-Gen/actions/workflows/ci.yml)
 
-**Generate project-local venv helper scripts for Python projects — Windows, WSL, macOS, and Linux.**
+**Generate, check, and safely update project-local venv helper scripts for Python projects — Windows, WSL, macOS, and Linux.**
 
 `venv-bat-gen` solves a specific Windows pain point: activating a virtual environment manually is annoying, error-prone, and breaks in scripts. The correct approach is to call `.venv\Scripts\python.exe` directly — but writing those helper scripts by hand every time is tedious.
 
-This tool generates a complete set of project-local helper scripts in seconds, from a polished GUI or a single CLI command. It also supports **repo-friendly mode** — generate a single self-unpacking `setup.bat` that you commit to your repo, and anyone who clones it gets the full set of scripts on first run.
+This tool generates a complete set of project-local helper scripts in seconds, from a polished GUI or a single CLI command. It records the settings it used in a small `.vbg.json` manifest, so it can later **check** a project for drift and **update** its scripts to newer templates without ever clobbering a script you edited by hand. It also supports **repo-friendly mode** — a single self-unpacking `setup.bat` you commit, which writes the full set of scripts on first run.
 
 ---
 
 ## What it generates
 
-For every project, `venv-bat-gen` writes up to **18 scripts** (`.bat` for Windows, `.sh` for POSIX, `.ps1` for PowerShell):
+For every project, `venv-bat-gen` writes up to **21 scripts** (`.bat` for Windows, `.sh` for POSIX, `.ps1` for PowerShell):
 
-| Script | Purpose |
+| Script | Purpose | Exit code |
+|---|---|---|
+| `run.bat` / `run.sh` / `run.ps1` | Run your project — file, module, runner, or console-script mode | your program's |
+| `pip.bat` / `pip.sh` / `pip.ps1` | Project-local pip (or `uv pip`) wrapper | pip's |
+| `shell.bat` / `shell.sh` / `shell.ps1` | Open an activated shell session | — |
+| `sync.bat` / `sync.sh` / `sync.ps1` | Install / sync dependencies | `1` if any install or `pip check` fails |
+| `doctor.bat` / `doctor.sh` / `doctor.ps1` | Environment health check | `1` if any `[FAIL]` |
+| `test.bat` / `test.sh` / `test.ps1` | Run pytest via the local venv | pytest's |
+| `setup.bat` / `setup.sh` / `setup.ps1` | One-time bootstrap (optional) | `1` if any step fails |
+
+Every script calls `.venv\Scripts\python.exe` (or `.venv/bin/python`) directly — **no manual activation required**, and no PATH pollution. Because exit codes are honest, the scripts work in CI, git hooks, and Task Scheduler too.
+
+### How `sync` installs dependencies
+
+- **pip mode:** `requirements.txt` if present; otherwise, if `pyproject.toml` declares a `[project]` table, the project itself with `pip install -e .` (a `pyproject.toml` that only configures tools such as ruff is left alone). `generate` doesn't create an empty `requirements.txt` stub for installable pyproject projects, because it would shadow this.
+- **uv mode:** `uv sync` for `uv.lock` or an installable `pyproject.toml`, else `uv pip install -r requirements.txt`. `UV_PROJECT_ENVIRONMENT` is pointed at your venv folder, so a custom venv name (e.g. `venv311`) is respected instead of uv silently creating `.venv`.
+
+### Non-interactive mode (CI, hooks, schedulers)
+
+Scripts pause at the end so a double-clicked window stays open. Set **`CI`** (GitHub Actions, GitLab, etc. set it for you) or **`VBG_NO_PAUSE=1`** and every pause is skipped. The `.sh` scripts only ever pause when stdin is a terminal.
+
+---
+
+## Keeping scripts up to date: `.vbg.json`, `check`, `update`
+
+`generate` writes `.vbg.json` next to the scripts. It holds the settings that determine their content (entry mode, venv folder, which script families, …) and a fingerprint of each generated file. Commit it. Pass `--no-manifest` (or untick the GUI option) to skip it.
+
+```bash
+# Is everything still what the saved settings would generate?  (exit 1 if not)
+venv-bat-gen check ./my_project
+venv-bat-gen check ./my_project --diff
+
+# Refresh scripts after upgrading venv-bat-gen, or after changing a setting
+venv-bat-gen update ./my_project
+venv-bat-gen update ./my_project --uv --no-posix      # flags override saved settings
+venv-bat-gen update ./my_project --dry-run            # show the plan only
+```
+
+`update` rewrites a file **only when it is provably untouched** since it was generated (its fingerprint matches `.vbg.json`):
+
+| On disk | What `update` does |
 |---|---|
-| `run.bat` / `run.sh` / `run.ps1` | Run your project — file, module, runner, or script mode |
-| `pip.bat` / `pip.sh` / `pip.ps1` | Project-local pip (or uv pip) wrapper |
-| `shell.bat` / `shell.sh` / `shell.ps1` | Open an activated shell session |
-| `sync.bat` / `sync.sh` / `sync.ps1` | Install / sync dependencies |
-| `doctor.bat` / `doctor.sh` / `doctor.ps1` | Environment health check |
-| `test.bat` / `test.sh` / `test.ps1` | Run pytest via the local venv |
+| missing | creates it |
+| already identical | nothing |
+| unchanged since generated | refreshes it |
+| edited by hand | **skips it** (exit 1) — `--force` overrides |
+| not written by venv-bat-gen | **skips it** (exit 1) — `--force` overrides |
+| no longer generated by the settings | reports it — `--prune` removes it if untouched |
 
-Every script calls `.venv\Scripts\python.exe` (or `.venv/bin/python`) directly — **no manual activation required**, and no PATH pollution.
+Every overwritten or removed file is first copied to `.vbg-backup/<timestamp>/`.
+
+**Projects generated before v3.6** have no `.vbg.json`. `check` and `update` recover the settings from the existing scripts' own headers, so no flags are needed, and `update --adopt` replaces them with the current templates (backing each one up first) and writes the manifest:
+
+```bash
+venv-bat-gen update ./old_project --adopt
+```
+
+Settings resolve the same way for `generate`, `check`, and `update`:
+
+> **CLI flag** > **`.vbg.json`** > `--preset` > recovered from existing scripts (check/update) > folder auto-detect > default
+
+Boolean options are tri-state (`--posix` / `--no-posix` / unset = inherit), so a saved setting can be switched off from the command line. `check` never uses platform-based auto-detection, so it gives the same answer on Windows and on a Linux CI runner.
 
 ---
 
@@ -31,18 +83,18 @@ Every script calls `.venv\Scripts\python.exe` (or `.venv/bin/python`) directly �
 
 Pass `--self-unpack` (CLI) or check **"Repo mode: single self-unpacking setup.bat"** (GUI) to generate a single `setup.bat` instead of individual scripts.
 
-**Ship only `setup.bat` in your repo.** On first run it:
+**Ship only `setup.bat` (and `.vbg.json`) in your repo.** On first run it:
 
 1. Checks Python (or uv) is available
 2. Creates the virtual environment
 3. Installs dependencies from `requirements.txt` / `uv.lock` / `pyproject.toml`
 4. Decodes and writes all companion scripts beside itself via `certutil`
 
-All companion scripts are embedded as base64 inside `setup.bat` — no dependencies, no internet, no installer required. Scripts that already exist are never overwritten, so re-running is safe.
+All companion scripts are embedded as base64 inside `setup.bat` — no dependencies, no internet, no installer required. Scripts that already exist are never overwritten, so re-running is safe. It exits 1 if anything failed.
 
 ```bash
-# Generate a self-unpacking setup.bat
-venv-bat-gen generate . --entry main.py --self-unpack
+# Generate a self-unpacking setup.bat and keep the companions out of git
+venv-bat-gen generate . --entry main.py --self-unpack --gitignore
 
 # With test runner and uv
 venv-bat-gen generate . --entry main.py --self-unpack --test --uv
@@ -51,30 +103,7 @@ venv-bat-gen generate . --entry main.py --self-unpack --test --uv
 venv-bat-gen generate . --entry main.py --self-unpack --preview
 ```
 
-**Recommended `.gitignore` additions** when using repo mode (the generated companions are not tracked):
-
-```gitignore
-run.bat
-pip.bat
-shell.bat
-sync.bat
-doctor.bat
-test.bat
-# If --posix is also used:
-run.sh
-pip.sh
-shell.sh
-sync.sh
-doctor.sh
-test.sh
-# If --powershell is also used:
-run.ps1
-pip.ps1
-shell.ps1
-sync.ps1
-doctor.ps1
-test.ps1
-```
+`--gitignore` (GUI: *Manage a .gitignore block*) maintains a clearly marked block in `.gitignore` covering the venv, `.vbg-backup/`, and — in repo mode — the companion scripts. Lines outside the block are never touched, re-running is idempotent, and `update` refreshes the block when the script set changes.
 
 > **Note:** `--self-unpack` and `--setup` are mutually exclusive. Self-unpack already includes the bootstrap logic.
 
@@ -136,8 +165,9 @@ python -m venv_bat_gen
 
 The GUI provides:
 - **Presets** — built-in templates for FastAPI, PyQt6, CLI scripts, Streamlit, uv projects, and repo self-unpack. Save your own.
-- **Folder auto-detect** — browse to a project folder and the scanner reads `pyproject.toml`, `uv.lock`, `requirements.txt`, and common entry files to suggest settings automatically.
+- **Folder auto-detect** — browse to a project folder and the scanner suggests settings: an existing venv (under any name), `[project.scripts]` console scripts, web frameworks, packages with `__main__.py` (including `src/` layouts), and common entry files. If the folder has a `.vbg.json`, **Load saved settings** restores it in one click.
 - **Live preview** — see the generated scripts before writing them, with syntax highlighting.
+- **Check Drift / Safe Update…** — the GUI versions of `check` and `update` (the update confirms before writing, offers to adopt pre-3.6 scripts, and never overwrites hand edits).
 - **Configure / Log tabs** — settings scroll freely on any screen size; the activity log switches automatically on generate.
 
 ### CLI
@@ -148,10 +178,7 @@ venv-bat-gen generate C:\projects\myapi --runner --entry uvicorn \
     --runner-args "app.main:app --host 0.0.0.0 --port 8000 --reload"
 
 # Repo mode — single self-unpacking setup.bat
-venv-bat-gen generate C:\projects\myapp --entry main.py --self-unpack
-
-# Repo mode with test runner and uv
-venv-bat-gen generate C:\projects\myapp --entry main.py --self-unpack --test --uv
+venv-bat-gen generate C:\projects\myapp --entry main.py --self-unpack --gitignore
 
 # Load a preset as defaults, then override
 venv-bat-gen generate C:\projects\myapp --preset "FastAPI / Uvicorn" --name MyApp
@@ -165,37 +192,17 @@ venv-bat-gen generate ~/projects/mytool --entry main.py --powershell
 # Preview generated content without writing files
 venv-bat-gen generate C:\projects\myapp --entry main.py --self-unpack --preview
 
-# Scan a folder for auto-detection hints
+# Check for drift / update safely (settings come from .vbg.json)
+venv-bat-gen check C:\projects\myapp --diff
+venv-bat-gen update C:\projects\myapp
+
+# Scan a folder for auto-detection hints (or --json for tooling)
 venv-bat-gen scan C:\projects\existing
-
-# Check whether generated files have drifted from current settings
-venv-bat-gen check C:\projects\myapp --entry main.py
-
-# Same, but show a unified diff of what changed
-venv-bat-gen check C:\projects\myapp --entry main.py --diff
+venv-bat-gen scan C:\projects\existing --json
 
 # List available presets
 venv-bat-gen presets
 ```
-
-#### Checking for drift
-
-`check` recomputes what `generate` would currently produce — using the
-same CLI flag > preset > folder auto-detect > default priority — and
-compares it against what's already on disk, without writing anything.
-Useful after upgrading `venv-bat-gen` (template changes) or in CI, to
-catch a project whose scripts have fallen out of sync with its settings:
-
-```bash
-venv-bat-gen check ./my_project --entry main.py
-# exit 0: everything matches
-# exit 1: something is missing or drifted — run `generate --overwrite` to fix
-```
-
-The one-time `Generated on: <timestamp>` line every script stamps is
-ignored for comparison purposes, so `check` won't report drift just
-because time has passed since the last `generate`.
-
 
 #### Entry modes
 
@@ -218,9 +225,14 @@ venv-bat-gen generate C:\projects\myapp --script --entry adp-server ^
 Args are parsed **once** at generation time and baked into each script as a
 literal, individually quoted argument vector — the generated scripts never
 re-split them at runtime. In `run.sh` they live in a bash array; in
-`run.ps1` a PowerShell array; in `run.bat` as quoted tokens. A `*.py`
+`run.ps1` a PowerShell array; in `run.bat` as quoted tokens (with trailing
+backslashes doubled, so `--out "C:\build dir\"` arrives intact). A `*.py`
 argument reaches your tool as the literal string `*.py`, not whatever
 Python files happen to sit next to the script.
+
+#### Input validation
+
+Settings are validated before anything is written (fail-closed, CLI and GUI alike): the venv folder must be a relative path inside the project (no `..`, no drive letter, none of `" % ! ^ & | < > * ? ' `` ` `` $`); project names may not contain control characters; module and console-script names must be valid; runner args must parse and contain no literal `"`. `generate` is all-or-nothing: if any target file already exists (and `--overwrite` is off), it lists **every** conflict and writes nothing.
 
 ---
 
@@ -228,9 +240,9 @@ Python files happen to sit next to the script.
 
 Pass `--uv` (CLI) or check "Use uv" (GUI) to generate uv-native scripts:
 
-- `sync.bat/sh` — runs `uv sync` (with `uv.lock` / `pyproject.toml` detection) or falls back to `uv pip install -r requirements.txt`
-- `pip.bat/sh` — wraps `uv pip --python .venv/...`
-- `doctor.bat/sh` — checks `uv` is on PATH and shows its version
+- `sync.*` — runs `uv sync` (with `uv.lock` / installable `pyproject.toml` detection) or falls back to `uv pip install -r requirements.txt`; `UV_PROJECT_ENVIRONMENT` targets your venv folder
+- `pip.*` — wraps `uv pip --python .venv/...`
+- `doctor.*` — checks `uv` is on PATH, and lists / checks packages with `uv pip` (uv-created venvs have no pip)
 - `create_venv` — runs `uv venv` instead of `python -m venv`, with graceful fallback if uv isn't installed
 
 The **"uv Project"** and **"Repo Self-Unpack (uv)"** built-in presets configure all of this automatically.
@@ -241,7 +253,7 @@ The **"uv Project"** and **"Repo Self-Unpack (uv)"** built-in presets configure 
 
 Pass `--posix` (CLI) or check "Generate POSIX .sh scripts" (GUI) to also write `.sh` equivalents of every script. Shell scripts are written with:
 - Unix LF line endings
-- `#!/usr/bin/env bash` shebang
+- `#!/usr/bin/env bash` shebang (bash 3.2-compatible, so stock macOS works)
 - `chmod +x` set automatically on generate
 - `.venv/bin/python` instead of `.venv\Scripts\python.exe`
 
@@ -254,11 +266,15 @@ The **"CLI Script (Cross-Platform)"** preset generates both `.bat` and `.sh` by 
 ## PowerShell (.ps1) scripts
 
 Pass `--powershell` (CLI) or check "Generate PowerShell .ps1 scripts" (GUI) to also write `.ps1` equivalents of every script. Useful where `.bat`/`.cmd` execution is blocked by policy but PowerShell is allowed. PowerShell scripts are written with:
-- Windows CRLF line endings (same as `.bat`) and `#Requires -Version 5.1`, so they run on the PowerShell that ships with Windows — no PowerShell 7/`pwsh` required
+- Windows CRLF line endings, a **UTF-8 BOM**, and `#Requires -Version 5.1`, so they run on the Windows PowerShell 5.1 that ships with Windows — no PowerShell 7/`pwsh` required. (Without the BOM, 5.1 reads scripts as ANSI, mangling non-ASCII project names.)
+- `Set-Location -LiteralPath`, so project folders containing `[` `]` work
 - `.venv\Scripts\python.exe` directly, same as `.bat`
 - `shell.ps1` dot-sources `Activate.ps1` and, if that fails due to an execution-policy restriction, prints the one-liner to fix it (`Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`) rather than failing silently
+- `run.ps1` compensates for Windows PowerShell 5.1's legacy native-argument passing (trailing backslashes in spaced arguments, empty arguments) for the baked-in runner args
 
 `--posix` and `--powershell` are independent — pass both to generate all three families at once. When combined with `--self-unpack`, `.ps1` scripts are embedded in `setup.bat` alongside `.bat` (and `.sh`, if also enabled) and written on first run.
+
+> PowerShell 7 on **Linux/macOS** glob-expands wildcard arguments passed to native programs (a baked `*.py` arrives as matching file names). Windows PowerShell doesn't. On POSIX, use `run.sh`, which passes them literally.
 
 ---
 
@@ -277,7 +293,7 @@ Built-in presets (read-only):
 | Repo Self-Unpack | file | main.py | — | — | ✔ |
 | Repo Self-Unpack (uv) | file | main.py | ✔ | — | ✔ |
 
-User presets are saved to `~/.venv_bat_gen/presets.json` and persist across sessions.
+User presets are saved to `~/.venv_bat_gen/presets.json` and persist across sessions. Entries in that file are validated on load: unknown fields and wrongly typed values are dropped, and a user preset can never shadow a built-in one.
 
 > **Upgrading from v3.3?** Presets previously stored in `~/.keystoneai/venv_generator_presets.json` are automatically migrated to the new location on first run.
 
@@ -287,20 +303,24 @@ User presets are saved to `~/.venv_bat_gen/presets.json` and persist across sess
 
 ```
 venv_bat_gen/
-├── __init__.py     # version
-├── __main__.py     # python -m venv_bat_gen entry point
-├── core.py         # GeneratorConfig, all template generators, scanner, presets
-├── cli.py          # argparse CLI — no Qt dependency
-└── gui.py          # PyQt6 GUI — imports from core
+├── __init__.py       # version
+├── __main__.py       # python -m venv_bat_gen entry point
+├── core.py           # GeneratorConfig, validation, all template generators,
+│                     # manifest / drift / update, scanner, presets
+├── cli.py            # argparse CLI — no Qt dependency
+├── gui.py            # PyQt6 GUI — imports from core
+└── gui_launcher.py   # friendly "install the gui extra" entry point
+tests/                # see tests/README.md
 ```
 
 `core.py` has zero Qt imports and is safe to use headlessly from scripts or other tools:
 
 ```python
-from venv_bat_gen.core import GeneratorConfig, generate_files
 from pathlib import Path
+from venv_bat_gen.core import (
+    GeneratorConfig, generate_files, check_drift, plan_update, apply_update, read_manifest,
+)
 
-# Standard multi-file generation
 cfg = GeneratorConfig(
     project_dir=Path("C:/projects/myapi"),
     project_name="MyAPI",
@@ -316,31 +336,16 @@ cfg = GeneratorConfig(
     include_test_bat=True,
     use_uv=False,
     include_posix=False,
+    include_powershell=False,
     include_setup=False,
-    self_unpack=False,
+    self_unpack=False,        # True -> writes only a self-unpacking setup.bat
+    write_manifest=True,      # also write .vbg.json (library default: False)
 )
-written = generate_files(cfg)
+written = generate_files(cfg)            # raises FileExistsError / ValueError, writes nothing
 
-# Repo mode — single self-unpacking setup.bat
-cfg_repo = GeneratorConfig(
-    project_dir=Path("C:/projects/myapp"),
-    project_name="MyApp",
-    venv_dir=".venv",
-    entry_mode="file",
-    app_entry="main.py",
-    runner_args="",
-    overwrite_existing=False,
-    create_requirements=True,
-    include_webengine_check=False,
-    pause_on_exit=True,
-    create_venv_now=False,
-    include_test_bat=True,
-    use_uv=False,
-    include_posix=False,
-    include_setup=False,
-    self_unpack=True,
-)
-written = generate_files(cfg_repo)  # writes only setup.bat
+drift = check_drift(cfg)                 # [DriftEntry(filename, status, expected, actual)]
+plan = plan_update(cfg, read_manifest(cfg.project_dir))
+backup_dir = apply_update(cfg, plan, read_manifest(cfg.project_dir))
 ```
 
 ---
@@ -361,7 +366,7 @@ Activation works fine interactively. It breaks when:
 - You have multiple projects open and activation leaks across terminals
 - You want a double-clickable launcher that just works
 
-Calling `.venv\Scripts\python.exe` directly avoids all of this. The generated scripts are readable, editable, and self-documenting — they're not magic wrappers.
+Calling `.venv\Scripts\python.exe` directly avoids all of this. The generated scripts are readable, editable, and self-documenting — they're not magic wrappers. And if you do edit them, `update` will leave your edits alone.
 
 ---
 
@@ -369,72 +374,17 @@ Calling `.venv\Scripts\python.exe` directly avoids all of this. The generated sc
 
 Issues and PRs welcome. The codebase is intentionally simple:
 
-- Add a new template → add `make_<name>_bat()` and `make_<name>_sh()` to `core.py`, register in `build_previews()`
+- Add a new script → add `make_<name>_bat()` / `_sh()` / `_ps1()` to `core.py`, register them in `_MAKERS` and `companion_names()`
 - Add a new preset → add an entry to `_BUILTIN_PRESETS` in `core.py`
-- Add a CLI flag → `_build_generate_parser()` in `cli.py`, wire through `_cmd_generate()`
-- Add a GUI option → `_build_options_group()` in `gui.py`, wire through `_read_config()`
+- Add a setting → a field on `GeneratorConfig`, an entry in `MANIFEST_SETTINGS` (if it affects content) and `_PRESET_FIELDS`, a CLI flag in `_add_shared_config_args()` (+ `_CLI_FIELDS`), and a GUI control in `gui.py`
+- Every bug fix comes with a test that fails without it — see `tests/test_regressions_v36.py`
+- Run `pytest` and `ruff check .` (ruff is pinned in the `dev` extras)
 
 ---
 
 ## Changelog
 
-### v3.5.0
-- **Runner args rebuilt as a literal argument vector** — `--runner-args` is
-  now parsed once with shell-style quoting (shlex) and emitted into every
-  template as an individually quoted literal vector: quoted tokens in
-  `run.bat`, a bash array (`set -u`-safe on bash 3.2) in `run.sh`, a
-  splatted array literal in `run.ps1`. Fixes three v3.4 correctness bugs:
-  `run.sh` word-split **and glob-expanded** args against the project
-  directory (`--include *.py` silently became the folder's actual .py
-  files); `run.bat` generation silently deleted double quotes, making
-  spaced arguments impossible; `run.ps1` re-split the string on whitespace
-  at runtime. The old blanket ban on `& | < > ^ "` is replaced by
-  fail-closed validation of genuinely unrepresentable input only
-  (unbalanced quotes, embedded literal `"`, quoted newlines).
-- **New `script` entry mode** — `--script` (CLI) / "Console script" (GUI)
-  runs the venv's own console-script binary
-  (`.venv\Scripts\<name>.exe`, `.venv/bin/<name>` on POSIX) with a
-  fail-closed existence check and a "fix with `pip.bat install -e .`"
-  error path, wired through run/doctor in all three shells.
-- **Scanner: `[project.scripts]` now suggests script mode** — previously it
-  suggested `python -m <module>` on the entry's right-hand module path,
-  which silently does nothing when that module lacks an
-  `if __name__ == "__main__"` guard. Script names are now matched
-  case-preserved (the whole pyproject was previously lowercased before
-  matching).
-- **`run.bat` no longer enables delayed expansion** — it never needed it,
-  and it corrupted any `!` in passthrough `%*` arguments or runner args.
-  (The self-unpacking `setup.bat` keeps its delayed expansion, which it
-  genuinely requires.)
-- **New regression suite** — `tests/test_runner_launch_v35.py` (20 tests),
-  including live execution of generated `run.sh` against a fake venv
-  proving glob/space/`!`/`%` survival, empty-args `set -u` safety, script
-  dispatch, and fail-closed missing-script behaviour. Each headline fix
-  proven to be caught by its test via revert.
-- **Cleanup** — removed dead `_UV_INDICATORS` constant; removed a leftover
-  "KeystoneAI" reference in the `__init__.py` docstring.
-
-**Also shipping in v3.5.0** (completed earlier but previously unreleased):
-- **GUI smoke-tested for real** — added `tests/test_gui_smoke.py` (PyQt6 + pytest-qt, runs headlessly via Qt's `offscreen` platform, `dev-gui` extra). This caught a real bug: `PresetManager`'s internal field allowlist hadn't been updated for the new `include_powershell` flag, so saving a custom preset via the GUI silently dropped that setting. Fixed, plus a standing regression guard so it can't happen again for any future flag.
-- **New PowerShell (`.ps1`) variant** — `--powershell` (CLI) / "Generate PowerShell .ps1 scripts" (GUI) generates `.ps1` equivalents of every script, targeting the PowerShell 5.1 that ships with Windows (no `pwsh`/PowerShell 7 required). Useful where `.bat` execution is blocked by policy but PowerShell is allowed. Independent of `--posix`; both can be enabled together. Also embeds correctly in `--self-unpack` mode alongside `.bat`/`.sh`. Along the way, fixed a pre-existing bug in `make_test_sh`: under `set -euo pipefail`, an unguarded pytest invocation meant bash would abort the script on test failure before the pass/fail banner or correct exit code ever ran.
-- **New `check` subcommand** — `venv-bat-gen check <folder>` recomputes what `generate` would currently produce (same CLI flag > preset > folder auto-detect > default priority) and compares it against what's on disk, without writing anything. Exits 1 if anything is missing or drifted (handy in CI after a template upgrade), 0 if up to date. `--diff` shows a unified diff per drifted file. The one-time `Generated on: <timestamp>` line is ignored for comparison so `check` doesn't false-positive purely from time passing.
-- **PyQt6 is now optional** — moved to a `gui` extra (`pip install venv-bat-gen[gui]`). The CLI has zero dependencies. `venv-bat-gen-gui` / `python -m venv_bat_gen` (no args) now exit with an actionable install hint instead of a bare `ModuleNotFoundError` when PyQt6 isn't installed.
-- **Test suite** — added `tests/`, covering every template generator (bat/sh/ps1), the self-unpacking round-trip, the folder scanner, the preset system, drift detection, and the full CLI argparse layer (100% line coverage of `core.py` and `cli.py`).
-- **CI** — GitHub Actions workflow running the test suite across Windows/macOS/Linux × Python 3.11–3.13, a `ruff` lint gate, and package build verification.
-- **Lint cleanup** — removed 3 unused imports and 2 stray f-string prefixes; the codebase's deliberate compact `if x: y` one-liner style is now a documented, project-wide `ruff` ignore (`E701`) rather than unaddressed noise.
-- **Fixed stale metadata** — `__init__.py`'s `__version__`/`__author__` now match `pyproject.toml` and the current `Leon Priest / 7h3v01d` branding; project URLs across `README.md` and `pyproject.toml` now consistently point to `github.com/7h3v01d/Venv-Bat-Gen`.
-
-### v3.4.0
-- **Repo mode** — new `--self-unpack` CLI flag and "Repo mode" GUI checkbox. Generates a single `setup.bat` containing all companion scripts encoded as base64, decoded via `certutil` on first run. Safe to re-run — existing files are never overwritten.
-- **Two new presets** — `Repo Self-Unpack` and `Repo Self-Unpack (uv)`
-- **Branding** — updated throughout to `Leon Priest / 7h3v01d`
-- **Preset storage** — moved from `~/.keystoneai/` to `~/.venv_bat_gen/`; automatic migration on first run
-- **`--self-unpack` + `--setup` mutex** — these are mutually exclusive; the CLI errors clearly if both are passed
-- **`certutil` failure detection** — the generated `setup.bat` now checks whether each output file was actually created and reports `[FAIL]` with a clear message if certutil is unavailable
-- **GUI** — `self_unpack` checkbox disables standalone `setup` option and vice versa; round-trips through preset save/load
-
-### v3.3.x
-- uv support, POSIX `.sh` scripts, project folder scanner, preset system
+See [CHANGELOG.md](CHANGELOG.md). **v3.6.0** adds the `.vbg.json` manifest, `update` (safe regeneration with backups and legacy adoption), CI-safe scripts with honest exit codes, pyproject-aware sync, smarter detection, and fixes eleven bugs found in a full audit of v3.5.0.
 
 ---
 
@@ -444,4 +394,4 @@ Apache 2.0 — see [LICENSE](LICENSE).
 
 ---
 
-*Built by [Leon Priest / 7h3v01d](https://github.com/7h3v01d) 
+*Built by [Leon Priest / 7h3v01d](https://github.com/7h3v01d)*

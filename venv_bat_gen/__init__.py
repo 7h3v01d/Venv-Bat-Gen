@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2025-2026 Leon Priest (7h3v01d)
 """
 venv_bat_gen
 ============
@@ -9,5 +11,5 @@ Public API:
     from venv_bat_gen.gui import main as gui_main
 """
 
-__version__ = "3.5.0"
+__version__ = "3.6.0"
 __author__  = "Leon Priest / 7h3v01d"

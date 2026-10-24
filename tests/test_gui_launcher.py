@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2025-2026 Leon Priest (7h3v01d)
 """
 Tests for venv_bat_gen.gui_launcher — the thin wrapper that lets
 `venv-bat-gen-gui` / `python -m venv_bat_gen` fail with an actionable

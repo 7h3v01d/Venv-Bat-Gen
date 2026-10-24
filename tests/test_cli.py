@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2025-2026 Leon Priest (7h3v01d)
 """
 Tests for venv_bat_gen.cli — the argparse wiring around core.py.
 
@@ -295,7 +297,13 @@ class TestSelfUnpackTip:
         assert "test.ps1" in out
 
     def test_self_unpack_only_writes_setup_bat(self, project, capsys):
+        # v3.6: plus the .vbg.json manifest, unless --no-manifest
         run_cli(["generate", str(project), "--self-unpack"])
+        capsys.readouterr()
+        assert sorted(p.name for p in project.iterdir()) == [".vbg.json", "setup.bat"]
+
+    def test_self_unpack_no_manifest_writes_only_setup_bat(self, project, capsys):
+        run_cli(["generate", str(project), "--self-unpack", "--no-manifest"])
         capsys.readouterr()
         assert [p.name for p in project.iterdir()] == ["setup.bat"]
 
@@ -384,8 +392,9 @@ class TestCheckCommand:
         assert "@@" not in out  # no unified-diff hunk markers without --diff
 
     def test_no_false_drift_from_timestamp_alone(self, project, capsys, monkeypatch):
-        import venv_bat_gen.core as core_module
         from datetime import datetime as real_datetime
+
+        import venv_bat_gen.core as core_module
 
         run_cli(["generate", str(project), "--entry", "main.py"])
         capsys.readouterr()

@@ -1,34 +1,50 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2025-2026 Leon Priest (7h3v01d)
 """
 venv_bat_gen.cli
 ================
-Command-line interface.  Imports directly from core — no Qt, no MagicMock.
+Command-line interface.  Imports directly from core — no Qt.
+
+Settings resolution (every subcommand that needs a config):
+
+    CLI flag  >  .vbg.json manifest  >  --preset  >  inferred from existing
+    scripts (check/update only, no manifest)  >  folder scan  >  default
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import difflib
+import json
+import os
 import sys
 from dataclasses import replace
 from pathlib import Path
 
 from .core import (
-    GeneratorConfig,
-    PresetManager,
-    MODULE_RE,
-    SCRIPT_RE,
-    runner_args_problem,
     _VERSION,
+    MANIFEST_NAME,
+    GeneratorConfig,
+    ManifestError,
+    PresetManager,
+    apply_update,
     build_previews,
     check_drift,
+    companion_names,
+    config_problem,
     create_venv,
     generate_files,
+    gitignore_entries,
+    infer_settings_from_scripts,
+    plan_update,
+    read_manifest,
     scan_project_folder,
+    update_gitignore,
 )
 
-
 # ---------------------------------------------------------------------------
-# Terminal colours (stdlib only)
+# Terminal output (stdlib only)
 # ---------------------------------------------------------------------------
 
 class C:
@@ -46,6 +62,20 @@ class C:
     accent = staticmethod(lambda t: C._w("35", t))
 
 
+def _safe_console() -> None:
+    """Never crash on output. When stdout/stderr is redirected on Windows,
+    Python encodes with the ANSI code page (cp1252), which has no ✔ / ─ / →;
+    v3.5.0 died with UnicodeEncodeError on `venv-bat-gen check . > log.txt`.
+    Unencodable characters are now replaced instead."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(errors="replace")
+            except (ValueError, OSError):  # pragma: no cover - exotic streams
+                pass
+
+
 def _rule(width: int = 60) -> str:
     return C.dim("─" * width)
 
@@ -57,14 +87,25 @@ def _print_header(title: str) -> None:
     print(_rule())
 
 
+def _error(msg: str) -> None:
+    print(C.err(f"[ERROR] {msg}"), file=sys.stderr)
+
+
 # ---------------------------------------------------------------------------
-# Shared: arguments and resolution logic common to `generate` and `check`
+# Shared: arguments and resolution logic common to generate / check / update
 # ---------------------------------------------------------------------------
+
+_BOOL = argparse.BooleanOptionalAction
+
 
 def _add_shared_config_args(p: argparse.ArgumentParser) -> None:
     """Arguments that affect *what* would be generated. Shared between
-    `generate` and `check` so both subcommands can never disagree about
-    what "the current settings" mean for a given invocation."""
+    `generate`, `check`, and `update` so they can never disagree about what
+    "the current settings" mean for a given invocation.
+
+    Boolean options are tri-state (--x / --no-x / unset): unset means
+    "inherit from the manifest / preset / scan", so a saved setting can be
+    switched off from the command line as well as on."""
     p.add_argument("--preset", metavar="NAME",
                    help="Load a named preset as defaults.")
 
@@ -79,131 +120,179 @@ def _add_shared_config_args(p: argparse.ArgumentParser) -> None:
                       help="Entry mode: venv console script <entry>[.exe] [runner-args]")
 
     p.add_argument("--entry",       metavar="VALUE",
-                   help="Entry file, module, or runner.")
-    p.add_argument("--runner-args", metavar="ARGS", default="",
+                   help="Entry file, module, runner, or console-script name.")
+    p.add_argument("--runner-args", metavar="ARGS", default=None,
                    help="Args appended after the runner module or console script "
                         "(runner/script modes). Shell-style quoting supported: "
                         "--runner-args 'serve --name \"My App\"'")
     p.add_argument("--name",        metavar="NAME",
-                   help="Project name in .bat headers (default: folder name).")
-    p.add_argument("--venv-dir",    metavar="DIR", default=".venv",
-                   help="Venv subdirectory name (default: .venv).")
+                   help="Project name in script headers (default: folder name).")
+    p.add_argument("--venv-dir",    metavar="DIR", default=None,
+                   help="Venv folder inside the project (default: .venv, or an "
+                        "existing venv the scan finds).")
 
-    p.add_argument("--webengine",       action="store_true",
-                   help="Include PyQt6 WebEngine check in doctor.bat.")
-    p.add_argument("--no-pause",        action="store_true",
-                   help="Do not pause run.bat on exit.")
-    p.add_argument("--test",            action="store_true",
-                   help="Include test.bat (pytest runner).")
-    p.add_argument("--uv",              action="store_true",
+    p.add_argument("--webengine",   action=_BOOL, default=None,
+                   help="Include the PyQt6 WebEngine check in doctor scripts.")
+    p.add_argument("--pause",       action=_BOOL, default=None,
+                   help="Pause when run.* exits (default: on). --no-pause disables.")
+    p.add_argument("--test",        action=_BOOL, default=None,
+                   help="Include test.* (pytest runner).")
+    p.add_argument("--uv",          action=_BOOL, default=None,
                    help="Generate uv-flavoured scripts instead of pip.")
-    p.add_argument("--posix",           action="store_true",
+    p.add_argument("--posix",       action=_BOOL, default=None,
                    help="Also generate POSIX .sh equivalents.")
-    p.add_argument("--powershell",      action="store_true",
+    p.add_argument("--powershell",  action=_BOOL, default=None,
                    help="Also generate PowerShell .ps1 equivalents.")
-    p.add_argument("--setup",           action="store_true",
-                   help="Include a standalone setup.bat bootstrap script.")
-    p.add_argument("--self-unpack",     action="store_true",
-                   help=(
-                       "Generate a single self-unpacking setup.bat for repo distribution. "
-                       "Encodes all companion scripts as base64 and writes them via certutil "
-                       "on first run. Mutually exclusive with --setup."
-                   ))
+    p.add_argument("--setup",       action=_BOOL, default=None,
+                   help="Include standalone setup.* bootstrap scripts.")
+    p.add_argument("--self-unpack", action=_BOOL, default=None,
+                   help=("Generate a single self-unpacking setup.bat for repo distribution "
+                         "(companions embedded as base64, written via certutil on first "
+                         "run). Mutually exclusive with --setup."))
+
+
+_DEFAULTS: dict = {
+    "venv_dir": ".venv", "entry_mode": "file", "app_entry": "main.py", "runner_args": "",
+    "include_webengine_check": False, "pause_on_exit": True, "include_test_bat": False,
+    "use_uv": False, "include_posix": False, "include_powershell": False,
+    "include_setup": False, "self_unpack": False,
+}
+
+#: CLI dest -> GeneratorConfig field
+_CLI_FIELDS = {
+    "venv_dir": "venv_dir", "entry_mode": "entry_mode", "entry": "app_entry",
+    "runner_args": "runner_args", "name": "project_name",
+    "webengine": "include_webengine_check", "pause": "pause_on_exit",
+    "test": "include_test_bat", "uv": "use_uv", "posix": "include_posix",
+    "powershell": "include_powershell", "setup": "include_setup",
+    "self_unpack": "self_unpack",
+}
+
+
+@dataclasses.dataclass
+class Resolved:
+    cfg: GeneratorConfig
+    preset: dict
+    manifest: object | None  # core.Manifest
+    sources: dict[str, str]  # field -> where the value came from
 
 
 def _resolve_generator_config(
-    args: argparse.Namespace, folder: Path, pm: PresetManager,
-) -> tuple[GeneratorConfig | None, dict, int]:
+    args: argparse.Namespace, folder: Path, pm: PresetManager, *, purpose: str = "generate",
+) -> tuple[Resolved | None, int]:
     """
-    Resolve CLI args + preset + folder scan into a GeneratorConfig, using
-    CLI flag > preset > scan suggestion > hardcoded default priority.
+    Resolve CLI args + manifest + preset + inference + folder scan into a
+    GeneratorConfig. Returns (Resolved, 0) or (None, exit_code) after
+    printing the reason.
 
-    Returns (cfg, preset_data, 0) on success, or (None, {}, exit_code) if
-    resolution should abort (mutex violation or invalid entry point).
-    Prints folder-scan hints / preset-not-found warnings as a side effect.
-
-    overwrite_existing / create_requirements / create_venv_now are set to
-    harmless placeholder values here (GeneratorConfig has no field defaults
-    of its own) — they only affect generate_files()'s write behavior, never
-    generated *content*, so callers that only need content (like `check`)
-    can use the result as-is; `generate` merges its own write-behavior
-    flags in afterwards via dataclasses.replace().
+    purpose="generate" uses every scan suggestion. purpose="check"/"update"
+    never use the *platform-dependent* POSIX suggestion (v3.5.0 did, so a
+    project generated on Windows and checked on Linux CI always "drifted"),
+    and, when there is no manifest, recover settings from the scripts
+    already on disk instead.
     """
     if args.self_unpack and args.setup:
-        print(C.err("[ERROR] --self-unpack and --setup are mutually exclusive."), file=sys.stderr)
-        print("        --self-unpack already embeds the bootstrap logic inside the single file.")
-        return None, {}, 1
+        _error("--self-unpack and --setup are mutually exclusive.")
+        print("        --self-unpack already embeds the bootstrap logic inside the single file.",
+              file=sys.stderr)
+        return None, 1
 
-    project_name = args.name or folder.name
+    try:
+        manifest = read_manifest(folder)
+    except ManifestError as exc:
+        _error(f"{exc}\n        Fix or delete {folder / MANIFEST_NAME} and re-run.")
+        return None, 1
 
-    preset_data: dict = {}
+    preset: dict = {}
     if args.preset:
-        preset_data = pm.get(args.preset) or {}
-        if not preset_data:
+        preset = pm.get(args.preset) or {}
+        if not preset:
             print(C.warn(f"[WARN] Preset '{args.preset}' not found — ignoring."))
 
-    # Auto-detect from folder (lower priority than explicit flags)
-    scan = scan_project_folder(folder, args.venv_dir)
-    if scan.hints:
+    inferred: dict = {}
+    if manifest is None and purpose in {"check", "update"}:
+        inferred = infer_settings_from_scripts(folder)
+
+    scan = scan_project_folder(folder, args.venv_dir or (manifest.settings.get("venv_dir")
+                                                         if manifest else None) or ".venv")
+    if manifest is None and purpose == "generate" and scan.hints:
         _print_header(f"Folder scan: {folder.name}")
         for h in scan.hints:
             print(f"  {h}")
         print()
 
-    # Resolve each setting: CLI flag > preset > scan suggestion > hardcoded default
-    def _pick(cli_val, preset_key, scan_val, default):
-        if cli_val is not None:
-            return cli_val
-        if preset_key in preset_data:
-            return preset_data[preset_key]
-        if scan_val is not None:
-            return scan_val
-        return default
+    scanned: dict = {
+        "venv_dir": scan.suggested_venv_dir,
+        "entry_mode": scan.suggested_entry_mode,
+        "app_entry": scan.suggested_app_entry,
+        "runner_args": scan.suggested_runner_args,
+        "use_uv": True if scan.suggested_use_uv else None,
+        "include_posix": (True if scan.suggested_use_posix else None)
+        if purpose == "generate" else None,
+    }
 
-    entry_mode  = _pick(args.entry_mode,  "entry_mode", scan.suggested_entry_mode,  "file")
-    app_entry   = _pick(args.entry,       "app_entry",  scan.suggested_app_entry,   "main.py")
-    runner_args = _pick(args.runner_args or None, "runner_args", scan.suggested_runner_args, "")
-    use_uv      = _pick(True if args.uv else None, "use_uv", scan.suggested_use_uv if scan.suggested_use_uv else None, False)
-    include_pos = _pick(True if args.posix else None, "include_posix", scan.suggested_use_posix if scan.suggested_use_posix else None, False)
-    include_ps1 = _pick(True if args.powershell else None, "include_powershell", None, False)
+    cli_vals = {f: getattr(args, d) for d, f in _CLI_FIELDS.items()}
+    layers = (
+        ("command line", cli_vals),
+        (MANIFEST_NAME, manifest.settings if manifest else {}),
+        ("preset", preset),
+        ("existing scripts", inferred),
+        ("folder scan", scanned),
+    )
 
-    self_unpack = args.self_unpack or preset_data.get("self_unpack", False)
+    values: dict = {}
+    sources: dict[str, str] = {}
+    for fld in list(_DEFAULTS) + ["project_name"]:
+        for label, layer in layers:
+            if layer.get(fld) is not None:
+                values[fld], sources[fld] = layer[fld], label
+                break
+        else:
+            values[fld] = _DEFAULTS.get(fld, folder.name)
+            sources[fld] = "default"
+
+    # setup / self-unpack exclusivity across layers: an explicit choice wins
+    if values["self_unpack"] and values["include_setup"]:
+        if args.setup:
+            values["self_unpack"] = False
+        else:
+            values["include_setup"] = False
 
     cfg = GeneratorConfig(
         project_dir=folder,
-        project_name=project_name,
-        venv_dir=args.venv_dir,
-        entry_mode=entry_mode,
-        app_entry=app_entry or "main.py",
-        runner_args=runner_args or "",
+        project_name=values["project_name"],
+        venv_dir=values["venv_dir"],
+        entry_mode=values["entry_mode"],
+        app_entry=values["app_entry"],
+        runner_args=values["runner_args"] if values["entry_mode"] in {"runner", "script"} else "",
         overwrite_existing=False,
         create_requirements=True,
-        include_webengine_check=args.webengine or preset_data.get("include_webengine_check", False),
-        pause_on_exit=not args.no_pause and preset_data.get("pause_on_exit", True),
+        include_webengine_check=values["include_webengine_check"],
+        pause_on_exit=values["pause_on_exit"],
         create_venv_now=False,
-        include_test_bat=args.test or preset_data.get("include_test_bat", False),
-        use_uv=use_uv,
-        include_posix=include_pos,
-        include_powershell=include_ps1,
-        include_setup=args.setup or preset_data.get("include_setup", False),
-        self_unpack=self_unpack,
+        include_test_bat=values["include_test_bat"],
+        use_uv=values["use_uv"],
+        include_posix=values["include_posix"],
+        include_powershell=values["include_powershell"],
+        include_setup=values["include_setup"],
+        self_unpack=values["self_unpack"],
     )
 
-    # Validate entry point
-    if cfg.entry_mode in {"module", "runner"}:
-        if not MODULE_RE.match(cfg.app_entry):
-            print(C.err(f"[ERROR] Invalid module name: '{cfg.app_entry}'"), file=sys.stderr)
-            return None, {}, 1
-    if cfg.entry_mode == "script" and not SCRIPT_RE.match(cfg.app_entry):
-        print(C.err(f"[ERROR] Invalid console-script name: '{cfg.app_entry}'"), file=sys.stderr)
-        return None, {}, 1
-    if cfg.entry_mode in {"runner", "script"}:
-        problem = runner_args_problem(cfg.runner_args)
-        if problem is not None:
-            print(C.err(f"[ERROR] {problem}"), file=sys.stderr)
-            return None, {}, 1
+    problem = config_problem(cfg)
+    if problem:
+        _error(problem)
+        return None, 1
 
-    return cfg, preset_data, 0
+    return Resolved(cfg, preset, manifest, sources), 0
+
+
+def _print_settings_source(res: Resolved) -> None:
+    if res.manifest is not None:
+        print(C.dim(f"  Settings: {MANIFEST_NAME} (saved by v{res.manifest.version})"
+                    + ("" if all(v != "command line" for v in res.sources.values())
+                       else " + command-line overrides")))
+    elif "existing scripts" in res.sources.values():
+        print(C.dim(f"  Settings: recovered from existing scripts (no {MANIFEST_NAME} yet)"))
 
 
 # ---------------------------------------------------------------------------
@@ -213,13 +302,14 @@ def _resolve_generator_config(
 def _build_generate_parser(sub) -> argparse.ArgumentParser:
     p = sub.add_parser(
         "generate",
-        help="Generate the .bat helper set for a project folder.",
+        help="Generate the helper-script set for a project folder.",
         description=(
-            "Generate run.bat, pip.bat, shell.bat, sync.bat, doctor.bat\n"
-            "(and optionally test.bat / setup.bat) in the target project folder.\n\n"
+            "Generate run, pip, shell, sync, doctor (and optionally test / setup)\n"
+            "scripts in the target project folder, plus a .vbg.json manifest that\n"
+            "records the settings so `check` and `update` can reproduce them.\n\n"
             "Use --self-unpack to generate a single repo-friendly setup.bat that\n"
             "bootstraps the venv and writes all companion scripts on first run.\n\n"
-            "Priority: CLI flags > --preset > folder auto-detect > defaults."
+            "Priority: CLI flags > .vbg.json > --preset > folder auto-detect > defaults."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -228,11 +318,16 @@ def _build_generate_parser(sub) -> argparse.ArgumentParser:
     _add_shared_config_args(p)
 
     p.add_argument("--overwrite",       action="store_true",
-                   help="Overwrite existing .bat files.")
+                   help="Overwrite existing script files.")
     p.add_argument("--no-requirements", action="store_true",
                    help="Do not create requirements.txt if missing.")
     p.add_argument("--create-venv",     action="store_true",
-                   help="Create the .venv immediately after generating scripts.")
+                   help="Create the venv immediately after generating scripts.")
+    p.add_argument("--no-manifest",     action="store_true",
+                   help=f"Do not write {MANIFEST_NAME}.")
+    p.add_argument("--gitignore",       action="store_true",
+                   help="Add/refresh a managed .gitignore block (venv, backups, and — in "
+                        "self-unpack mode — the companion scripts).")
     p.add_argument("--preview",         action="store_true",
                    help="Print generated content to stdout instead of writing files.")
     p.add_argument("--list-presets",    action="store_true",
@@ -245,40 +340,36 @@ def _cmd_generate(args: argparse.Namespace) -> int:
     pm = PresetManager()
 
     if args.list_presets:
-        _print_header("Available Presets")
-        for name in pm.names():
-            marker = C.dim("(built-in)") if pm.is_builtin(name) else C.accent("(user)")
-            print(f"  {C.bold(name)}  {marker}")
-        print()
-        return 0
+        return _cmd_presets(args)
 
     folder = args.folder.resolve()
 
-    cfg, preset_data, code = _resolve_generator_config(args, folder, pm)
-    if cfg is None:
+    res, code = _resolve_generator_config(args, folder, pm, purpose="generate")
+    if res is None:
         return code
+    cfg = res.cfg
 
     cfg = replace(
         cfg,
-        overwrite_existing=args.overwrite or preset_data.get("overwrite_existing", False),
-        create_requirements=not args.no_requirements and preset_data.get("create_requirements", True),
-        create_venv_now=args.create_venv or preset_data.get("create_venv_now", False),
+        overwrite_existing=args.overwrite or res.preset.get("overwrite_existing", False),
+        create_requirements=not args.no_requirements and res.preset.get("create_requirements", True),
+        create_venv_now=args.create_venv or res.preset.get("create_venv_now", False),
+        write_manifest=not args.no_manifest,
     )
 
     if args.preview:
-        previews = build_previews(cfg)
-        for name, content in previews.items():
+        for name, content in build_previews(cfg).items():
             _print_header(name)
             print(content)
         return 0
 
     _print_header(f"Generating for: {folder}")
-    mode_str = cfg.entry_mode
-    if cfg.self_unpack:
-        mode_str = "self-unpack"
-    uv_str   = "  [uv]" if cfg.use_uv else ""
+    _print_settings_source(res)
+    mode_str  = "self-unpack" if cfg.self_unpack else cfg.entry_mode
+    uv_str    = "  [uv]" if cfg.use_uv else ""
     posix_str = "  [+posix]" if cfg.include_posix else ""
-    print(f"  Mode  : {mode_str}{uv_str}{posix_str}")
+    ps_str    = "  [+powershell]" if cfg.include_powershell else ""
+    print(f"  Mode  : {mode_str}{uv_str}{posix_str}{ps_str}")
     print(f"  Entry : {cfg.app_entry}")
     if cfg.entry_mode in {"runner", "script"} and cfg.runner_args:
         print(f"  Args  : {cfg.runner_args}")
@@ -287,39 +378,35 @@ def _cmd_generate(args: argparse.Namespace) -> int:
     try:
         written = generate_files(cfg)
     except FileExistsError as exc:
-        print(C.err(f"[ERROR] {exc}"), file=sys.stderr)
+        _error(str(exc))
         return 1
-    except Exception as exc:
-        print(C.err(f"[ERROR] {exc}"), file=sys.stderr)
+    except (ValueError, OSError) as exc:
+        _error(str(exc))
         return 1
 
     for path in written:
         print(f"  {C.ok('✔')}  {path.name}")
 
-    if cfg.self_unpack:
+    if args.gitignore:
+        if update_gitignore(folder, gitignore_entries(cfg)):
+            print(f"  {C.ok('✔')}  .gitignore  {C.dim('(managed block updated)')}")
+    elif cfg.self_unpack:
         print()
-        print(C.dim("  Tip: add these to .gitignore (generated on first run):"))
-        names = ["run.bat", "pip.bat", "shell.bat", "sync.bat", "doctor.bat"]
-        if cfg.include_test_bat: names.append("test.bat")
-        if cfg.include_posix:
-            names += ["run.sh", "pip.sh", "shell.sh", "sync.sh", "doctor.sh"]
-            if cfg.include_test_bat: names.append("test.sh")
-        if cfg.include_powershell:
-            names += ["run.ps1", "pip.ps1", "shell.ps1", "sync.ps1", "doctor.ps1"]
-            if cfg.include_test_bat: names.append("test.ps1")
-        print(f"  {C.dim(chr(10).join('    ' + n for n in names))}")
+        print(C.dim("  Tip: these are written on first run — keep them out of git with"))
+        print(C.dim("  `--gitignore`, or add them to .gitignore yourself:"))
+        print(C.dim("\n".join("    " + n for n in companion_names(cfg))))
 
     if cfg.create_venv_now:
         venv_path = folder / cfg.venv_dir
         if venv_path.exists():
-            print(C.warn(f"\n  [SKIP] .venv already exists at {venv_path}"))
+            print(C.warn(f"\n  [SKIP] venv already exists at {venv_path}"))
         else:
             tool = "uv venv" if cfg.use_uv else "python -m venv"
-            print(f"\n  Creating .venv via {tool}…")
+            print(f"\n  Creating venv via {tool}…")
             try:
                 create_venv(cfg)
-                print(C.ok(f"  ✔  .venv created at {venv_path}"))
-            except Exception as exc:
+                print(C.ok(f"  ✔  venv created at {venv_path}"))
+            except Exception as exc:  # noqa: BLE001 - CalledProcessError, OSError, ...
                 print(C.err(f"  [ERROR] venv creation failed: {exc}"), file=sys.stderr)
 
     print()
@@ -338,8 +425,10 @@ def _build_check_parser(sub) -> argparse.ArgumentParser:
         help="Check whether generated files have drifted from current settings.",
         description=(
             "Recompute what `generate` would currently produce for this project\n"
-            "(same CLI flag > preset > folder auto-detect > default priority) and\n"
-            "compare it against what's already on disk. Nothing is written.\n\n"
+            "and compare it against what's already on disk. Nothing is written.\n\n"
+            "Settings come from .vbg.json when present (so the result is the same\n"
+            "on every machine), otherwise they are recovered from the existing\n"
+            "scripts. CLI flags override either.\n\n"
             "Exits 0 if everything matches; exits 1 if anything is missing or drifted\n"
             "— useful in CI to catch a project that's fallen behind a template change."
         ),
@@ -356,11 +445,13 @@ def _cmd_check(args: argparse.Namespace) -> int:
     pm = PresetManager()
     folder = args.folder.resolve()
 
-    cfg, _preset_data, code = _resolve_generator_config(args, folder, pm)
-    if cfg is None:
+    res, code = _resolve_generator_config(args, folder, pm, purpose="check")
+    if res is None:
         return code
+    cfg = res.cfg
 
     _print_header(f"Checking: {folder}")
+    _print_settings_source(res)
     entries = check_drift(cfg)
 
     any_issue = False
@@ -392,12 +483,101 @@ def _cmd_check(args: argparse.Namespace) -> int:
             print()
 
     if any_issue:
-        print(C.warn("  Drift detected — run `generate --overwrite` to update."))
+        print(C.warn("  Drift detected — run `update` to refresh untouched scripts safely"
+                     " (or `generate --overwrite`)."))
     else:
         print(C.ok("  Up to date — no drift detected."))
     print()
 
     return 1 if any_issue else 0
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: update
+# ---------------------------------------------------------------------------
+
+def _build_update_parser(sub) -> argparse.ArgumentParser:
+    p = sub.add_parser(
+        "update",
+        help="Safely regenerate scripts (new templates or settings), keeping hand edits.",
+        description=(
+            "Regenerate a project's scripts from its saved settings (.vbg.json) —\n"
+            "e.g. after upgrading venv-bat-gen — or with changed settings (flags).\n\n"
+            "A file is only rewritten when it is provably untouched since it was\n"
+            "generated (its fingerprint matches .vbg.json). Hand-edited or foreign\n"
+            "files are skipped unless --force. Every overwritten or removed file is\n"
+            "first copied to .vbg-backup/<timestamp>/.\n\n"
+            "Projects generated before v3.6 have no .vbg.json: their settings are\n"
+            "recovered from the existing scripts, and --adopt lets update take over\n"
+            "files that carry the venv-bat-gen header.\n\n"
+            "Exits 1 if any file had to be skipped."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument("folder", type=Path, help="Project folder to update.")
+    _add_shared_config_args(p)
+    p.add_argument("--dry-run", action="store_true", help="Show the plan; write nothing.")
+    p.add_argument("--force",   action="store_true",
+                   help="Also overwrite edited or foreign files (backed up first).")
+    p.add_argument("--adopt",   action="store_true",
+                   help="No .vbg.json: take over existing venv-bat-gen scripts (backed up first).")
+    p.add_argument("--prune",   action="store_true",
+                   help="Remove untouched files that the settings no longer generate.")
+    return p
+
+
+_ACTION_STYLE = {
+    "create":    ("+", C.ok),   "update": ("↻", C.ok), "unchanged": ("✔", C.dim),
+    "skip":      ("⚠", C.warn), "remove": ("−", C.warn), "stale": ("○", C.warn),
+}
+
+
+def _cmd_update(args: argparse.Namespace) -> int:
+    pm = PresetManager()
+    folder = args.folder.resolve()
+
+    res, code = _resolve_generator_config(args, folder, pm, purpose="update")
+    if res is None:
+        return code
+    cfg = res.cfg
+
+    if res.manifest is None and "existing scripts" not in res.sources.values() and not any(
+            (folder / n).exists() for n in build_previews(cfg)):
+        _error(f"Nothing to update in {folder}: no {MANIFEST_NAME} and no generated "
+               "scripts. Use `generate` first.")
+        return 1
+
+    actions = plan_update(cfg, res.manifest, force=args.force, adopt=args.adopt,
+                          prune=args.prune)
+
+    _print_header(f"{'Update plan' if args.dry_run else 'Updating'}: {folder}")
+    _print_settings_source(res)
+    for act in actions:
+        symbol, colour = _ACTION_STYLE[act.action]
+        print(f"  {colour(symbol)}  {act.filename:<12} {C.dim(act.action + ' — ' + act.reason)}")
+    print()
+
+    skipped = [a for a in actions if a.action == "skip"]
+    changes = [a for a in actions if a.action in {"create", "update", "remove"}]
+
+    if not args.dry_run:
+        backup = apply_update(cfg, actions, res.manifest)
+        gi = folder / ".gitignore"
+        if gi.exists() and "venv-bat-gen (managed block" in gi.read_text(encoding="utf-8",
+                                                                          errors="replace"):
+            update_gitignore(folder, gitignore_entries(cfg))
+        if backup is not None:
+            print(C.dim(f"  Backups: {backup}"))
+        print(C.ok(f"  {len(changes)} file(s) changed; {MANIFEST_NAME} updated."))
+    else:
+        print(C.dim(f"  Dry run — {len(changes)} file(s) would change. Nothing written."))
+
+    if skipped:
+        hint = "--adopt" if res.manifest is None else "--force"
+        print(C.warn(f"  {len(skipped)} file(s) skipped to protect local changes — "
+                     f"review them, then re-run with {hint} if you want them replaced."))
+    print()
+    return 1 if skipped else 0
 
 
 # ---------------------------------------------------------------------------
@@ -413,12 +593,18 @@ def _build_scan_parser(sub) -> argparse.ArgumentParser:
     p.add_argument("folder",    type=Path, help="Project folder to scan.")
     p.add_argument("--venv-dir", metavar="DIR", default=".venv",
                    help="Venv subdirectory to check (default: .venv).")
+    p.add_argument("--json", action="store_true", help="Machine-readable output.")
     return p
 
 
 def _cmd_scan(args: argparse.Namespace) -> int:
     folder = args.folder.resolve()
     scan   = scan_project_folder(folder, args.venv_dir)
+    if args.json:
+        data = dataclasses.asdict(scan)
+        data["venv_path"] = str(scan.venv_path) if scan.venv_path else None
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+        return 0
     _print_header(f"Scan: {folder}")
     for h in scan.hints:
         print(f"  {h}")
@@ -431,11 +617,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 def _build_presets_parser(sub) -> argparse.ArgumentParser:
-    p = sub.add_parser(
-        "presets",
-        help="List available presets.",
-    )
-    return p
+    return sub.add_parser("presets", help="List available presets.")
 
 
 def _cmd_presets(_args: argparse.Namespace) -> int:
@@ -453,15 +635,17 @@ def _cmd_presets(_args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 def main(argv: list[str] | None = None) -> None:
+    _safe_console()
     parser = argparse.ArgumentParser(
         prog="venv-bat-gen",
         description=(
             f"Venv Batch Template Generator v{_VERSION}  (Leon Priest / 7h3v01d)\n"
-            "Generate project-local venv helper scripts (.bat + optional .sh).\n\n"
+            "Generate project-local venv helper scripts (.bat, plus optional .sh / .ps1).\n\n"
             "Quick start:\n"
             "  venv-bat-gen generate ./my_project --entry main.py\n"
-            "  venv-bat-gen generate ./my_project --entry main.py --self-unpack\n"
+            "  venv-bat-gen generate ./my_project --entry main.py --self-unpack --gitignore\n"
             "  venv-bat-gen check ./my_project\n"
+            "  venv-bat-gen update ./my_project\n"
             "  venv-bat-gen scan ./my_project"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -471,19 +655,30 @@ def main(argv: list[str] | None = None) -> None:
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
     _build_generate_parser(sub)
     _build_check_parser(sub)
+    _build_update_parser(sub)
     _build_scan_parser(sub)
     _build_presets_parser(sub)
 
     args = parser.parse_args(argv)
 
-    if args.command == "generate":
-        sys.exit(_cmd_generate(args))
-    elif args.command == "check":
-        sys.exit(_cmd_check(args))
-    elif args.command == "scan":
-        sys.exit(_cmd_scan(args))
-    elif args.command == "presets":
-        sys.exit(_cmd_presets(args))
-    else:
-        parser.print_help()
-        sys.exit(0)
+    commands = {
+        "generate": _cmd_generate, "check": _cmd_check, "update": _cmd_update,
+        "scan": _cmd_scan, "presets": _cmd_presets,
+    }
+    if args.command in commands:
+        try:
+            code = commands[args.command](args)
+            sys.stdout.flush()
+        except BrokenPipeError:
+            # Output piped into e.g. `head` that stopped reading: exit quietly
+            # (Python docs' recommended handling — no traceback).
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, sys.stdout.fileno())
+            sys.exit(1)
+        sys.exit(code)
+    parser.print_help()
+    sys.exit(0)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    main()

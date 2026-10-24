@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2025-2026 Leon Priest (7h3v01d)
 """
 Tests for PresetManager: built-in preset catalogue, user preset persistence,
 and migration from the legacy ~/.keystoneai/ storage location.
@@ -208,7 +210,8 @@ class TestCorruptStorage:
         def _boom(*a, **kw):
             raise OSError("disk full")
 
-        monkeypatch.setattr("pathlib.Path.write_text", _boom)
+        # v3.6 persists atomically via a temp file (Path.write_bytes)
+        monkeypatch.setattr("pathlib.Path.write_bytes", _boom)
         pm.save("Won't Persist", {"venv_dir": ".venv"})  # should not raise
         captured = capsys.readouterr()
         assert "Could not save presets" in captured.err

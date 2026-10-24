@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2025-2026 Leon Priest (7h3v01d)
 """
 Tests for the Windows .bat template generators in core.py:
 make_run_bat, make_pip_bat, make_shell_bat, make_sync_bat,
@@ -5,7 +7,6 @@ make_doctor_bat, make_test_bat, make_setup_bat.
 """
 
 from __future__ import annotations
-
 
 from venv_bat_gen.core import (
     make_doctor_bat,
@@ -16,7 +17,6 @@ from venv_bat_gen.core import (
     make_sync_bat,
     make_test_bat,
 )
-
 
 # ---------------------------------------------------------------------------
 # make_run_bat
@@ -50,11 +50,13 @@ class TestMakeRunBat:
 
     def test_pause_on_exit_true_adds_pause(self, cfg_factory):
         cfg = cfg_factory(pause_on_exit=True)
-        assert "pause\nexit /b %EXITCODE%" in make_run_bat(cfg)
+        # v3.6: pauses go through %VBG_PAUSE% so CI / VBG_NO_PAUSE can skip them
+        assert "%VBG_PAUSE%\nexit /b %EXITCODE%" in make_run_bat(cfg)
 
     def test_pause_on_exit_false_omits_pause(self, cfg_factory):
         cfg = cfg_factory(pause_on_exit=False)
         content = make_run_bat(cfg)
+        assert "%VBG_PAUSE%\nexit /b %EXITCODE%" not in content
         assert "pause\nexit /b %EXITCODE%" not in content
         assert "exit /b %EXITCODE%" in content
 
